@@ -1,0 +1,62 @@
+{
+  "generated_at_utc": "2025-08-29T10:07:07.778097",
+  "n_samples": 169,
+  "n_classes": 11,
+  "classes": [
+    "API",
+    "Authentication",
+    "Backend",
+    "Database",
+    "Deployment",
+    "DevOps",
+    "Reporting",
+    "Security",
+    "UI",
+    "UI Bug",
+    "string"
+  ],
+  "metrics": {
+    "cv_folds": [
+      {
+        "fold": 1,
+        "accuracy": 0.7352941176470589,
+        "macro_f1": 0.487917637917638,
+        "macro_precision": 0.5433862433862434,
+        "macro_recall": 0.49074074074074076
+      },
+      {
+        "fold": 2,
+        "accuracy": 0.5,
+        "macro_f1": 0.5213320013320014,
+        "macro_precision": 0.5183333333333333,
+        "macro_recall": 0.555952380952381
+      },
+      {
+        "fold": 3,
+        "accuracy": 0.5882352941176471,
+        "macro_f1": 0.5501165501165501,
+        "macro_precision": 0.5613756613756613,
+        "macro_recall": 0.5453703703703704
+      },
+      {
+        "fold": 4,
+        "accuracy": 0.4411764705882353,
+        "macro_f1": 0.39007724301841945,
+        "macro_precision": 0.3484848484848485,
+        "macro_recall": 0.48925619834710743
+      },
+      {
+        "fold": 5,
+        "accuracy": 0.5151515151515151,
+        "macro_f1": 0.4646780303030303,
+        "macro_precision": 0.45535714285714285,
+        "macro_recall": 0.5
+      }
+    ],
+    "cv_macro_f1": 0.43466267470311964,
+    "cv_macro_precision": 0.41396353007606207,
+    "cv_macro_recall": 0.4986002886002886,
+    "cv_accuracy": 0.5562130177514792,
+    "cv_report": "                precision    recall  f1-score   support\n\n           API       0.80      1.00      0.89        20\nAuthentication       0.28      0.18      0.22        28\n       Backend       0.30      0.26      0.28        35\n      Database       0.94      0.89      0.91        18\n    Deployment       0.22      0.16      0.19        25\n        DevOps       0.00      0.00      0.00         1\n     Reporting       0.86      1.00      0.92        18\n      Security       0.00      0.00      0.00         1\n            UI       0.87      1.00      0.93        20\n        UI Bug       0.29      1.00      0.44         2\n        string       0.00      0.00      0.00         1\n\n      accuracy                           0.56       169\n     macro avg       0.41      0.50      0.43       169\n  weighted avg       0.53      0.56      0.54       169\n"
+  }
+}
