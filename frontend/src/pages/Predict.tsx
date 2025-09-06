@@ -1,5 +1,5 @@
 // frontend/src/pages/Predict.tsx
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient  } from "@tanstack/react-query";
 import { predict, feedback, getSprints, getIssues, predictBulk, feedbackBulk, PredictResponse, getSprintsLive, syncJira } from "../api";
 
@@ -45,9 +45,10 @@ export default function Predict() {
 
   const [selectedSprint, setSelectedSprint] = useState<string>("");
 
-  useEffect(() => {
-    if (!selectedSprint && sprints && sprints.length > 0) setSelectedSprint(sprints[0]);
-  }, [sprints, selectedSprint]);
+    useEffect(() => {
+      if (!selectedSprint && sprints && sprints.length > 0) setSelectedSprint(sprints[0]);
+    }, [sprints, selectedSprint]);
+
 
   const {
     data: issuesFromApi = [],
@@ -135,11 +136,26 @@ export default function Predict() {
       setSyncing(false);
     }
   };
+  
 
+// const [issues, setIssues] = useState<IssueRow[]>([]);
+// useEffect(() => {
+//   setIssues(Array.isArray(issuesFromApi) ? issuesFromApi : []);
+// }, [issuesFromApi]);
 
   const [issues, setIssues] = useState<IssueRow[]>([]);
+
+// useEffect(() => {
+//   setIssues(Array.isArray(issuesFromApi) ? [...issuesFromApi] : []);
+// }, [issuesFromApi.length]); // Depend on length instead of the array reference
+
+  const prevIssuesRef = useRef(issuesFromApi);
+
   useEffect(() => {
-    setIssues(Array.isArray(issuesFromApi) ? issuesFromApi : []);
+    if (issuesFromApi !== prevIssuesRef.current) {
+      prevIssuesRef.current = issuesFromApi;
+      setIssues(Array.isArray(issuesFromApi) ? [...issuesFromApi] : []);
+    }
   }, [issuesFromApi]);
 
   const [selectedMap, setSelectedMap] = useState<Record<string, boolean>>({});

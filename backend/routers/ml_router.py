@@ -177,6 +177,42 @@ async def _sync_jira_worker(sprint: Optional[str], max_results: int, warnings_ou
 
 # ---- Endpoints ----
 
+@router.post("/sync/board")
+async def sync_board(max_results: int = 2000):
+    """
+    Fetch recent Jira issues and return dashboard-only metadata (sprints list, counts, last_sync).
+    This endpoint does NOT modify the shared corpus or write files — it's read-only for dashboard use.
+    """
+    jira = JiraUtility(HOST, USERNAME, API_TOKEN)
+    try:
+        jql = f"project = '{PROJECT_KEY}' AND issuetype = Bug ORDER BY created DESC"
+        issues = await jira.get_issues(jql=jql, max_results=max_results)
+        if not issues:
+            return {"status": "ok", "message": "no issues found", "updated_sprints": [], "n_issues": 0, "last_sync": pd.Timestamp.now().isoformat()}
+
+        df = build_df_from_jira_issues(issues, HOST)
+
+        # compute sprints found (parsed by build_df_from_jira_issues)
+        sprints = sorted([s for s in df["sprint"].astype(str).unique() if s and str(s).strip()])
+
+        # basic counts for dashboard KPIs
+        total = int(df.shape[0])
+        open_count = int(df[~df["status"].str.lower().isin(["done","closed","resolved"])].shape[0]) if "status" in df.columns else total
+        closed_count = total - open_count
+        high_sev_vals = {"Blocker","Critical","High"}
+        high_sev_count = int(df[df.get("severity", "").astype(str).isin(high_sev_vals)].shape[0]) if "severity" in df.columns else 0
+
+        return {
+            "status": "ok",
+            "updated_sprints": sprints,
+            "n_issues": total,
+            "last_sync": pd.Timestamp.now().isoformat(),
+            "kpis": {"total": total, "open": open_count, "closed": closed_count, "highSeverity": high_sev_count}
+        }
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+
 @router.get("/incidents")
 async def get_incidents(max_results: int = Query(2000, description="Max issues to fetch")):
     """
@@ -465,16 +501,33 @@ async def get_sprints(refresh: bool = Query(False, description="If true, refresh
     try:
         if CORPUS_PATH.exists():
             existing = pd.read_parquet(CORPUS_PATH)
-            merged = pd.concat([existing, df], ignore_index=True).drop_duplicates(subset=["issue_key"], keep="last")
+
+            if refresh:
+                # Full refresh → overwrite corpus with fresh Jira issues (removes deleted ones)
+                merged = df.copy()
+            else:
+                # Normal path → append new and update changed, keep old
+                merged = pd.concat([existing, df], ignore_index=True).drop_duplicates(
+                    subset=["issue_key"], keep="last"
+                )
+
             tmp_merge = CORPUS_PATH.with_suffix(".tmp.parquet")
             merged.to_parquet(tmp_merge, index=False)
             os.replace(str(tmp_merge), str(CORPUS_PATH))
-            LAST_SYNC_PATH.write_text(json.dumps({"last_sync": pd.Timestamp.now().isoformat(), "sprints": sprints, "n_issues": int(merged.shape[0])}))
+            LAST_SYNC_PATH.write_text(json.dumps({
+                "last_sync": pd.Timestamp.now().isoformat(),
+                "sprints": sprints,
+                "n_issues": int(merged.shape[0])
+            }))
         else:
             df.to_parquet(CORPUS_PATH, index=False)
-            LAST_SYNC_PATH.write_text(json.dumps({"last_sync": pd.Timestamp.now().isoformat(), "sprints": sprints, "n_issues": int(df.shape[0])}))
-    except Exception:
-        # ignore merge failures (best-effort)
+            LAST_SYNC_PATH.write_text(json.dumps({
+                "last_sync": pd.Timestamp.now().isoformat(),
+                "sprints": sprints,
+                "n_issues": int(df.shape[0])
+            }))
+    except Exception as e:
+        print(f"[WARN] corpus merge failed: {e}")
         pass
 
     return sprints

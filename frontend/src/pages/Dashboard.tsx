@@ -1,7 +1,7 @@
 // src/pages/Dashboard.tsx
 import React, { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { api } from "../api";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { api, syncBoard  } from "../api";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, Brush, BarChart, Bar, PieChart, Pie, Cell,
@@ -23,6 +23,13 @@ type Incident = {
   confidence_score: number;
   recommendation?: any;
   Sprint?: string;
+};
+
+type KPIData = {
+  total: number;
+  open: number;
+  closed: number;
+  highSeverity: number;
 };
 
 const parseDate = (s?: string) => {
@@ -50,12 +57,52 @@ const HIGH_SEV = new Set(["Blocker", "Critical", "High"]);
 const monthNames = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
 export default function Dashboard() {
+  const queryClient = useQueryClient();
   const [yearFilter, setYearFilter] = useState<string>("All");
   const [viewBy, setViewBy] = useState<"sprint"|"month"|"quarter">("sprint");
   const [monthFilter, setMonthFilter] = useState<string>("All"); // '1'..'12' or 'All'
   const [sprintFilter, setSprintFilter] = useState<string>("All");
+  const [syncingBoard, setSyncingBoard] = useState<boolean>(false);
+  const [liveKPIs, setLiveKPIs] = useState<KPIData | null>(null);
+  
+  const handleRefreshBoard = async () => {
+  if (!window.confirm("Refresh board from Jira? This will fetch the latest dashboard data (no model changes).")) return;
+  setSyncingBoard(true);
 
-  const { data, isLoading, isError, error } = useQuery<Incident[]>({
+  try {
+    // Trigger backend sync
+    const res = await syncBoard(5000);
+
+    // Immediately update KPIs if provided
+    if (res?.kpis) {
+      setLiveKPIs({
+        total: Number(res.kpis.total ?? 0),
+        open: Number(res.kpis.open ?? 0),
+        closed: Number(res.kpis.closed ?? 0),
+        highSeverity: Number(res.kpis.highSeverity ?? 0),
+      });
+    }
+
+    // ✅ Fire success alert immediately after updating KPIs
+    alert("Board refresh started. Data will sync shortly.");
+
+    // Kick off refetch in background to refresh all data
+    await queryClient.invalidateQueries({ queryKey: ["incidents", "all"] });
+
+    refetch().finally(() => setLiveKPIs(null));
+
+  } catch (err: any) {
+    console.error("Refresh board failed:", err);
+    alert("Board refresh failed: " + (err?.message || err));
+    setLiveKPIs(null);
+  } finally {
+    setSyncingBoard(false);
+  }
+};
+
+
+
+  const { data, isLoading, isError, error, refetch } = useQuery<Incident[]>({
     queryKey: ["incidents", "all"],
     queryFn: () => api.get("/incidents", { params: { max_results: 5000 } }).then(r => r.data),
     staleTime: 60_000,
@@ -185,6 +232,9 @@ export default function Dashboard() {
     };
   }, [data, yearFilter, monthFilter, sprintFilter]);
 
+  // Use live KPIs if available, otherwise use computed KPIs
+  const displayKPIs = liveKPIs || kpis;
+
   const sprintChartWidth = Math.max(900, (viewBy === "sprint" ? sprintSeries.length : monthSeries.length) * 120);
   const quarterChartWidth = Math.max(800, quarterSeveritySeries.length * 160);
 
@@ -235,14 +285,12 @@ export default function Dashboard() {
             {availableMonths.map(m => <option key={m} value={String(m)}>{monthNames[m-1]} ({m})</option>)}
           </select>
         </div>
-
-        <div>
-          <label style={{ marginLeft: 8, marginRight: 8 }}>Sprint:</label>
-          <select value={sprintFilter} onChange={(e) => setSprintFilter(e.target.value)}>
-            <option value="All">All</option>
-            {availableSprints.map(s => <option key={s} value={s}>{s}</option>)}
-          </select>
-        </div>
+        <button
+          onClick={handleRefreshBoard}
+          disabled={syncingBoard}
+          style={{ marginLeft: "auto", padding: "6px 12px", background: "black", color: "white", border: "none", borderRadius: 4 }}>
+          {syncingBoard ? "Syncing..." : "Refresh Board"}
+        </button>
       </div>
 
       <div style={{
@@ -251,10 +299,10 @@ export default function Dashboard() {
         gap: "12px",
         marginBottom: "1rem",
       }}>
-        <KpiCard title="Total Defects" value={kpis.total} />
-        <KpiCard title="Open" value={kpis.open} />
-        <KpiCard title="Closed" value={kpis.closed} />
-        <KpiCard title="High Severity" value={kpis.highSeverity} />
+        <KpiCard title="Total Defects" value={displayKPIs.total} />
+        <KpiCard title="Open" value={displayKPIs.open} />
+        <KpiCard title="Closed" value={displayKPIs.closed} />
+        <KpiCard title="High Severity" value={displayKPIs.highSeverity} />
       </div>
 
       <h3>Bugs</h3>
@@ -268,7 +316,6 @@ export default function Dashboard() {
               <Tooltip />
               <Legend />
               <Line type="monotone" dataKey="count" stroke="#8884d8" />
-              {/* <Brush dataKey="label" height={18} travellerWidth={10} /> */}
             </LineChart>
           </ResponsiveContainer>
         </div>

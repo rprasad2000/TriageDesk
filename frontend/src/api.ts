@@ -12,6 +12,7 @@ export const predict = (text: string, top_k = 5) => api.post<PredictResponse>("/
 export const feedback = (text: string, true_label: string, source = "user") => api.post("/feedback", { text, true_label, source }).then(r => r.data);
 export const retrain = () => api.post<TrainResponse>("/retrain").then(r => r.data);
 
+export const syncBoard = (max_results = 2000) => api.post("/sync/board", { max_results }).then(r => r.data);
 export const getIncidents = (max_results = 2000) => api.get(`/incidents?max_results=${max_results}`).then(r => r.data);
 export const getDashboard = (start?: string, end?: string, group = "month", max_issues = 2000) => {
   const q = new URLSearchParams();

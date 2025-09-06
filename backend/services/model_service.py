@@ -283,7 +283,7 @@ def build_df_from_jira_issues(issues: List[Dict[str, Any]], host: str) -> pd.Dat
                 # if multiple sprints, take the last (usually the most recent board sprint)
                 return names[-1]
         return ""
-
+   
     rows = []
     for raw in issues:
         key = raw.get("key")
@@ -309,6 +309,8 @@ def build_df_from_jira_issues(issues: List[Dict[str, Any]], host: str) -> pd.Dat
 
         # sprint
         sprint_name = _extract_sprint_name(fields)
+        
+
 
         url = _host_issue_url(host, key) if key else ""
 
@@ -337,6 +339,23 @@ def _load_artifacts(require_classifier: bool = True):
     vectorizer = joblib.load(VECT_PATH)
     tfidf_matrix = _load_sparse(MATRIX_PATH)
     corpus = pd.read_parquet(CORPUS_PATH)
+
+    # Defensive alignment: ensure tfidf_matrix rows and corpus rows match.
+    try:
+        n_mat = int(tfidf_matrix.shape[0])
+        n_corpus = len(corpus)
+        if n_mat != n_corpus:
+            # truncate both to the smaller dimension to avoid indexing errors
+            m = min(n_mat, n_corpus)
+            # slice sparse matrix and dataframe
+            tfidf_matrix = tfidf_matrix[:m]
+            corpus = corpus.iloc[:m].reset_index(drop=True)
+            # log a clear warning so future debugging is easy
+            print(f"[WARN] artifact row-count mismatch: tfidf_matrix={n_mat}, corpus={n_corpus}. Truncated to {m}.")
+    except Exception as e:
+        # be defensive but continue if something odd happens
+        print(f"[WARN] failed to validate artifact shapes: {e}")
+
     clf = enc = None
     if require_classifier:
         if not MODEL_PATH.exists() or not ENC_PATH.exists():
@@ -344,6 +363,7 @@ def _load_artifacts(require_classifier: bool = True):
         clf = joblib.load(MODEL_PATH)
         enc = joblib.load(ENC_PATH)
     return vectorizer, tfidf_matrix, corpus, clf, enc
+
 
 def classify_and_recommend(text: str, top_k: int = 5) -> Dict[str, Any]:
     vectorizer, tfidf_matrix, corpus, clf, enc = _load_artifacts(require_classifier=True)
