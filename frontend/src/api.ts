@@ -1,4 +1,3 @@
-// src/api.ts
 import axios from "axios";
 
 const baseURL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8001/api/v1/ml";
@@ -21,4 +20,20 @@ export const getDashboard = (start?: string, end?: string, group = "month", max_
   q.set("group", group);
   q.set("max_issues", `${max_issues}`);
   return api.get(`/dashboard?${q.toString()}`).then(r => r.data);
+};
+
+/* --- New endpoints for Predict page --- */
+export const getSprints = () => api.get<string[]>("/sprints").then(r => r.data);
+export const getIssues = (sprint?: string, openOnly = true) => api.get(`/issues?sprint=${encodeURIComponent(sprint||"")}&openOnly=${openOnly}`).then(r => r.data);
+export const predictBulk = (issue_keys?: string[], texts?: string[], top_k = 3) => api.post("/predict/bulk", { issue_keys, texts, top_k }).then(r => r.data);
+export const feedbackBulk = (entries: { issue_key?: string; text?: string; true_label: string; source?: string }[]) => api.post("/feedback/bulk", { entries }).then(r => r.data);
+
+export const getSprintsLive = (refresh = false) =>
+  api.get<string[]>(`/sprints?refresh=${refresh}`).then(r => r.data);
+
+export const syncJira = (sprint?: string, force = false) => {
+  const q = new URLSearchParams();
+  if (sprint) q.set("sprint", sprint);
+  if (force) q.set("force", "true");
+  return api.post(`/sync/jira?${q.toString()}`).then(r => r.data);
 };
