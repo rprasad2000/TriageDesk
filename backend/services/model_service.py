@@ -10,6 +10,7 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics.pairwise import linear_kernel
 from sklearn.model_selection import GroupShuffleSplit
 from sklearn.metrics import accuracy_score, classification_report
+from sklearn.metrics.pairwise import linear_kernel
 
 # ---------------- Paths & artifacts ----------------
 MODELS_DIR = Path("backend/models")
@@ -394,3 +395,36 @@ def retrain_with_feedback() -> Dict[str, Any]:
     else:
         merged = corpus
     return train_from_dataframe(merged)
+
+def classify_and_recommend_batch(texts: List[str], top_k: int = 3) -> List[Dict[str, Any]]:
+    """
+    Return a list of dicts with keys: prediction, confidence, recommendations (list)
+    for each input text. Uses vectorized operations.
+    """
+    vectorizer, tfidf_matrix, corpus, clf, enc = _load_artifacts(require_classifier=True)
+    # vectorize all texts at once
+    q_vec = vectorizer.transform([str(t) for t in texts])
+    proba = clf.predict_proba(q_vec)  # shape: (n_texts, n_classes)
+    pred_idx = np.argmax(proba, axis=1)
+    confidences = proba[np.arange(len(pred_idx)), pred_idx].astype(float)
+    pred_labels = enc.inverse_transform(pred_idx.tolist())
+
+    # similarity matrix: compute row-wise linear_kernel between q_vec and tfidf_matrix
+    sims = linear_kernel(q_vec, tfidf_matrix)  # shape: (n_texts, n_corpus)
+    results = []
+    for i in range(q_vec.shape[0]):
+        sim_row = sims[i]
+        top_idx = sim_row.argsort()[::-1][:top_k]
+        recs = [{
+            "issue_key": corpus.iloc[j]["issue_key"],
+            "summary": corpus.iloc[j]["summary"],
+            "url": corpus.iloc[j]["url"],
+            "similarity": float(sim_row[j]),
+            "label": corpus.iloc[j].get("label", "")
+        } for j in top_idx]
+        results.append({
+            "prediction": str(pred_labels[i]),
+            "confidence": float(confidences[i]),
+            "recommendations": recs
+        })
+    return results

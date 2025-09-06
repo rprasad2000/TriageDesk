@@ -4,6 +4,12 @@ from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 import yaml, os, math
 import pandas as pd
+import json
+import tempfile
+import time
+from fastapi import BackgroundTasks
+import asyncio
+
 
 from services.model_service import (
     DATA_DIR,
@@ -47,6 +53,19 @@ class FeedbackRequest(BaseModel):
     true_label: str
     source: Optional[str] = "user"
 
+class BulkPredictRequest(BaseModel):
+    # either issue_keys (list) or texts (list); prefer issue_keys so UI can pass issue_key and backend fetches text
+    issue_keys: Optional[List[str]] = None
+    texts: Optional[List[str]] = None
+    top_k: int = 3
+
+class BulkPredictResponseItem(BaseModel):
+    issue_key: Optional[str]
+    prediction: str
+    confidence: float
+    recommendations: List[Dict[str, Any]]
+
+
 # Helper to attempt prediction safely
 def _safe_predict(text: str, top_k: int = 3) -> Dict[str, Any]:
     try:
@@ -57,6 +76,104 @@ def _safe_predict(text: str, top_k: int = 3) -> Dict[str, Any]:
         return {"prediction": "", "confidence": 0.0, "recommendations": []}
     except Exception:
         return {"prediction": "", "confidence": 0.0, "recommendations": []}
+    
+# move/define a sync worker that performs the heavy lifting (refactor of existing code)
+async def _sync_jira_worker(sprint: Optional[str], max_results: int, warnings_out: Optional[list] = None):
+    """
+    Worker that performs the actual Jira fetch and updates CORPUS_PATH and last_sync metadata.
+    This is run in background (non-blocking to HTTP request).
+    """
+    warn_list = warnings_out if isinstance(warnings_out, list) else []
+    jira = JiraUtility(HOST, USERNAME, API_TOKEN)
+
+    async def _try_get_issues(jql: str, max_attempts: int = 3, backoff: float = 1.0):
+        last_exc = None
+        for attempt in range(max_attempts):
+            try:
+                issues = await jira.get_issues(jql=jql, max_results=max_results)
+                return issues or []
+            except Exception as e:
+                last_exc = e
+                time.sleep(backoff * (attempt + 1))
+        # if all attempts failed, raise last exception
+        raise last_exc
+
+    try:
+        if sprint:
+            safe_sprint = str(sprint).replace('"', '\\"')
+            jql = f"""project = '{PROJECT_KEY}' AND issuetype = Bug AND sprint = "{safe_sprint}" ORDER BY created DESC"""
+            try:
+                issues = await _try_get_issues(jql)
+            except Exception as e:
+                warn_list.append(f"Jira query by sprint failed: {e}")
+                issues = []
+
+            if not issues:
+                warn_list.append(f'No issues returned by sprint-JQL for "{sprint}". Falling back to scanning recent issues and filtering locally.')
+                all_jql = f"project = '{PROJECT_KEY}' AND issuetype = Bug ORDER BY created DESC"
+                try:
+                    all_issues = await _try_get_issues(all_jql)
+                except Exception as e:
+                    warn_list.append(f"Failed to fetch recent issues fallback: {e}")
+                    all_issues = []
+                if not all_issues:
+                    # nothing to do
+                    return {"status": "ok", "message": "No issues found in Jira during fallback", "warnings": warn_list}
+                df_all = build_df_from_jira_issues(all_issues, HOST)
+                matched = df_all[df_all["sprint"].astype(str).str.strip().str.lower() == str(sprint).strip().lower()]
+                if matched.shape[0] == 0:
+                    warn_list.append(f'After fallback scan, no issues had parsed sprint matching "{sprint}". Merging full recent dataset.')
+                    df_new = df_all
+                else:
+                    df_new = matched.reset_index(drop=True)
+            else:
+                df_new = build_df_from_jira_issues(issues, HOST)
+        else:
+            jql = f"project = '{PROJECT_KEY}' AND issuetype = Bug ORDER BY created DESC"
+            try:
+                issues = await _try_get_issues(jql)
+            except Exception as e:
+                warn_list.append(f"Failed to fetch issues from Jira: {e}")
+                issues = []
+            if not issues:
+                return {"status": "ok", "message": "No issues found in Jira", "warnings": warn_list}
+            df_new = build_df_from_jira_issues(issues, HOST)
+
+        # Merge/update corpus
+        if CORPUS_PATH.exists():
+            try:
+                df_existing = pd.read_parquet(CORPUS_PATH)
+                combined = pd.concat([df_existing, df_new], ignore_index=True)
+                combined = combined.drop_duplicates(subset=["issue_key"], keep="last").reset_index(drop=True)
+            except Exception as e:
+                warn_list.append(f"Failed to merge existing corpus: {e}; using new df.")
+                combined = df_new.copy()
+        else:
+            combined = df_new.copy()
+
+        # atomic write
+        try:
+            tmp_path = CORPUS_PATH.with_suffix(".tmp.parquet")
+            cols = ["issue_key","summary","ticket_description","url","label","created","priority","status","severity","root_cause","sprint"]
+            available = [c for c in cols if c in combined.columns]
+            combined[available].to_parquet(tmp_path, index=False)
+            os.replace(str(tmp_path), str(CORPUS_PATH))
+        except Exception as e:
+            warn_list.append(f"Failed to write corpus file: {e}")
+            return {"status": "error", "detail": f"Failed to write corpus file: {e}", "warnings": warn_list}
+
+        # update metadata
+        try:
+            sprints = sorted([s for s in combined["sprint"].astype(str).unique() if s and str(s).strip()])
+            meta = {"last_sync": pd.Timestamp.now().isoformat(), "sprints": sprints, "n_issues": int(combined.shape[0])}
+            LAST_SYNC_PATH.write_text(json.dumps(meta))
+        except Exception as e:
+            warn_list.append(f"Failed to write last_sync metadata: {e}")
+
+        return {"status": "ok", "updated_sprints": sprints, "n_issues": int(combined.shape[0]), "warnings": warn_list}
+    except Exception as e:
+        warn_list.append(f"Unexpected sync error: {e}")
+        return {"status": "error", "detail": str(e), "warnings": warn_list}
 
 # ---- Endpoints ----
 
@@ -267,3 +384,188 @@ def retrain():
         return {"message": "Retraining complete", **result}
     except FileNotFoundError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    
+#**************************************************************************************************
+# Jira sync + refreshed sprints endpoint (non-breaking addition)
+
+LAST_SYNC_PATH = DATA_DIR / "last_sync.json"
+SYNC_TTL_MINUTES = 30  # default caching TTL for GET /sprints (can be tuned)
+
+async def _fetch_issues_from_jira(jira: JiraUtility, jql: str, max_results: int):
+    issues = await jira.get_issues(jql=jql, max_results=max_results)
+    return issues or []
+
+@router.post("/sync/jira")
+async def sync_jira(sprint: Optional[str] = None, force: bool = False, max_results: int = 5000):
+    """
+    Start a Jira sync in background and return immediately.
+    Use GET /sprints?refresh=true to retrieve updated sprint list after sync completes.
+    """
+    # If not forced and TTL is fresh, return cached immediately
+    try:
+        if not force and LAST_SYNC_PATH.exists():
+            meta = json.loads(LAST_SYNC_PATH.read_text())
+            last = pd.to_datetime(meta.get("last_sync"))
+            if (pd.Timestamp.now() - last) < pd.Timedelta(minutes=SYNC_TTL_MINUTES):
+                return {"status": "cached", "last_sync": meta.get("last_sync"), "sprints": meta.get("sprints", [])}
+    except Exception:
+        # ignore metadata parsing and proceed to start a background sync
+        pass
+
+    # schedule background worker using asyncio.create_task
+    try:
+        asyncio.create_task(_sync_jira_worker(sprint, max_results, []))
+        return {"status": "started", "message": "Jira sync started in background. Poll /sprints or check last_sync.json for updates."}
+    except Exception as e:
+        # fallback: attempt to run synchronously and return the result
+        try:
+            res = await _sync_jira_worker(sprint, max_results, [])
+            return res
+        except Exception as ex:
+            return {"status": "error", "detail": f"Failed to start background sync: {ex}"}
+
+
+
+@router.get("/sprints")
+async def get_sprints(refresh: bool = Query(False, description="If true, refresh from Jira")):
+    """
+    Return list of sprints known in corpus. If refresh=True, fetch fresh from Jira and update corpus.
+    Returns a simple list of sprint names.
+    """
+    # If not refresh and we have last_sync metadata, return cached sprints
+    if not refresh and LAST_SYNC_PATH.exists():
+        try:
+            meta = json.loads(LAST_SYNC_PATH.read_text())
+            return meta.get("sprints", [])
+        except Exception:
+            pass
+
+    # If corpus exists and not forcing refresh, derive sprints from corpus
+    if CORPUS_PATH.exists() and not refresh:
+        try:
+            df = pd.read_parquet(CORPUS_PATH)
+            # accept both 'sprint' and 'Sprint' column names
+            if "sprint" not in df.columns and "Sprint" in df.columns:
+                df = df.rename(columns={"Sprint": "sprint"})
+            sprints = sorted([s for s in df["sprint"].astype(str).unique() if s and str(s).strip()])
+            return sprints
+        except Exception:
+            pass
+
+    # Fallback: fetch from Jira (may be heavier)
+    jira = JiraUtility(HOST, USERNAME, API_TOKEN)
+    jql = f"project = '{PROJECT_KEY}' AND issuetype = Bug ORDER BY created DESC"
+    issues = await jira.get_issues(jql=jql, max_results=3000)
+    if not issues:
+        return []
+    df = build_df_from_jira_issues(issues, HOST)
+    sprints = sorted([s for s in df["sprint"].astype(str).unique() if s and str(s).strip()])
+
+    # Try merging into corpus (best-effort)
+    try:
+        if CORPUS_PATH.exists():
+            existing = pd.read_parquet(CORPUS_PATH)
+            merged = pd.concat([existing, df], ignore_index=True).drop_duplicates(subset=["issue_key"], keep="last")
+            tmp_merge = CORPUS_PATH.with_suffix(".tmp.parquet")
+            merged.to_parquet(tmp_merge, index=False)
+            os.replace(str(tmp_merge), str(CORPUS_PATH))
+            LAST_SYNC_PATH.write_text(json.dumps({"last_sync": pd.Timestamp.now().isoformat(), "sprints": sprints, "n_issues": int(merged.shape[0])}))
+        else:
+            df.to_parquet(CORPUS_PATH, index=False)
+            LAST_SYNC_PATH.write_text(json.dumps({"last_sync": pd.Timestamp.now().isoformat(), "sprints": sprints, "n_issues": int(df.shape[0])}))
+    except Exception:
+        # ignore merge failures (best-effort)
+        pass
+
+    return sprints
+
+# GET /issues?sprint=...&openOnly=true
+@router.get("/issues")
+def get_issues(sprint: Optional[str] = None, openOnly: bool = True):
+    from services.model_service import CORPUS_PATH
+    if CORPUS_PATH.exists():
+        df = pd.read_parquet(CORPUS_PATH)
+    elif (DATA_DIR / "QA_Defects_Issues.csv").exists():
+        df = pd.read_csv(DATA_DIR / "QA_Defects_Issues.csv")
+    else:
+        raise HTTPException(status_code=404, detail="No local dataset available.")
+    # normalize created etc if necessary
+    if "sprint" in df.columns:
+        if sprint:
+            df = df[df["sprint"] == sprint]
+    # consider status field:
+    if openOnly and "status" in df.columns:
+        df = df[~df["status"].str.lower().isin(["done","closed","resolved","cancelled"])]
+    # return minimal per-issue payload
+    out = []
+    for _, r in df.iterrows():
+        out.append({
+            "issue_key": r.get("issue_key"),
+            "summary": r.get("summary", ""),
+            "ticket_description": r.get("ticket_description",""),
+            "priority": r.get("priority",""),
+            "severity": r.get("severity",""),
+            "status": r.get("status",""),
+            "created": r.get("created",""),
+            "Sprint": r.get("sprint","")
+        })
+    return out
+
+# POST /predict/bulk
+@router.post("/predict/bulk")
+def predict_bulk(req: BulkPredictRequest):
+    # build texts
+    texts = []
+    issue_keys = []
+    if req.issue_keys:
+        # look up texts from corpus (or try Jira fetch per key)
+        from services.model_service import CORPUS_PATH
+        if CORPUS_PATH.exists():
+            corpus = pd.read_parquet(CORPUS_PATH)
+            for k in req.issue_keys:
+                row = corpus[corpus["issue_key"]==k]
+                if not row.empty:
+                    texts.append(str(row.iloc[0]["ticket_description"]))
+                    issue_keys.append(k)
+                else:
+                    texts.append("")  # safeguard
+                    issue_keys.append(k)
+        else:
+            # fallback: call Jira per key (expensive) — implement if needed
+            raise HTTPException(status_code=400, detail="Corpus not available to resolve issue_keys.")
+    elif req.texts:
+        texts = req.texts
+        issue_keys = [None]*len(texts)
+    else:
+        raise HTTPException(status_code=400, detail="Provide issue_keys or texts.")
+    # call batch classifier
+    from services.model_service import classify_and_recommend_batch
+    try:
+        results = classify_and_recommend_batch(texts, top_k=req.top_k)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    # attach issue_keys
+    out = []
+    for k, r in zip(issue_keys, results):
+        out.append({"issue_key": k, **r})
+    return {"predictions": out}
+
+# POST /feedback/bulk
+class BulkFeedbackRequest(BaseModel):
+    entries: List[Dict[str, str]]  # each: {issue_key?:..., text?:..., true_label:..., source?:...}
+
+@router.post("/feedback/bulk")
+def feedback_bulk(req: BulkFeedbackRequest):
+    from services.model_service import save_feedback
+    for e in req.entries:
+        txt = e.get("text") or ""
+        if not txt and e.get("issue_key"):
+            # try to resolve from corpus
+            from services.model_service import CORPUS_PATH
+            if CORPUS_PATH.exists():
+                c = pd.read_parquet(CORPUS_PATH)
+                r = c[c["issue_key"]==e["issue_key"]]
+                if not r.empty:
+                    txt = r.iloc[0]["ticket_description"]
+        save_feedback(txt, e["true_label"], source=e.get("source","user"))
+    return {"message": "saved", "n": len(req.entries)}
