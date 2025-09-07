@@ -196,11 +196,30 @@ async def sync_board(max_results: int = 2000):
         sprints = sorted([s for s in df["sprint"].astype(str).unique() if s and str(s).strip()])
 
         # basic counts for dashboard KPIs
+        # total = int(df.shape[0])
+        # open_count = int(df[~df["status"].str.lower().isin(["done","closed","resolved"])].shape[0]) if "status" in df.columns else total
+        # closed_count = total - open_count
+        # high_sev_vals = {"Blocker","Critical","High"}
+        # high_sev_count = int(df[df.get("severity", "").astype(str).isin(high_sev_vals)].shape[0]) if "severity" in df.columns else 0
+                # basic counts for dashboard KPIs (defensive / canonical)
         total = int(df.shape[0])
-        open_count = int(df[~df["status"].str.lower().isin(["done","closed","resolved"])].shape[0]) if "status" in df.columns else total
+        # normalize lower-case status safely
+        if "status" in df.columns:
+            status_series = df["status"].astype(str).str.strip().str.lower()
+            open_count = int(status_series[~status_series.isin(["done", "closed", "resolved", "cancelled"])].shape[0])
+        else:
+            open_count = total
         closed_count = total - open_count
-        high_sev_vals = {"Blocker","Critical","High"}
-        high_sev_count = int(df[df.get("severity", "").astype(str).isin(high_sev_vals)].shape[0]) if "severity" in df.columns else 0
+
+        # canonical high severity values (keep in sync with frontend HIGH_SEV)
+        high_sev_vals = {"Blocker", "Critical", "Major"}
+        if "severity" in df.columns:
+            # ensure strings and exact-match set membership
+            sev_series = df["severity"].astype(str).str.strip()
+            high_sev_count = int(sev_series[sev_series.isin(high_sev_vals)].shape[0])
+        else:
+            high_sev_count = 0
+
 
         return {
             "status": "ok",
@@ -214,17 +233,30 @@ async def sync_board(max_results: int = 2000):
 
 
 @router.get("/incidents")
-async def get_incidents(max_results: int = Query(2000, description="Max issues to fetch")):
+async def get_incidents(
+    max_results: int = Query(2000, description="Max issues to fetch"),
+    issuetype: Optional[str] = Query("Bug", description="Jira issuetype to query (e.g. Bug, Story). Set to '' to not filter by issuetype")
+):
     """
     Fetch issues from Jira, enrich with predictions.
-    Returns full list (up to max_results).
+    Returns full list (up to max_results). If no issues found, returns an empty list (200).
     """
-    jql = f"""project = '{PROJECT_KEY}' AND issuetype = Bug ORDER BY created DESC"""
-    jira = JiraUtility(HOST, USERNAME, API_TOKEN)
-    issues = await jira.get_issues(jql=jql, max_results=max_results)
+    # build JQL depending on issuetype param (allow empty to skip issuetype filter)
+    if issuetype and str(issuetype).strip():
+        jql = f"""project = '{PROJECT_KEY}' AND issuetype = {issuetype} ORDER BY created DESC"""
+    else:
+        jql = f"""project = '{PROJECT_KEY}' ORDER BY created DESC"""
 
+    jira = JiraUtility(HOST, USERNAME, API_TOKEN)
+    try:
+        issues = await jira.get_issues(jql=jql, max_results=max_results)
+    except Exception as e:
+        # surface upstream errors clearly
+        raise HTTPException(status_code=502, detail=f"Failed to query Jira: {e}")
+
+    # If no issues found, return an empty list (frontend can show message)
     if not issues:
-        raise HTTPException(status_code=404, detail="No Jira issues found.")
+        return []
 
     df = build_df_from_jira_issues(issues, HOST)
 
@@ -247,6 +279,7 @@ async def get_incidents(max_results: int = Query(2000, description="Max issues t
             "Sprint": row.get("sprint", "") if "sprint" in row else "",
         })
     return enriched
+
 
 @router.get("/dashboard")
 def get_dashboard(start: Optional[str] = Query(None), end: Optional[str] = Query(None), group: str = Query("month"), max_issues: int = Query(2000)):
@@ -622,3 +655,15 @@ def feedback_bulk(req: BulkFeedbackRequest):
                     txt = r.iloc[0]["ticket_description"]
         save_feedback(txt, e["true_label"], source=e.get("source","user"))
     return {"message": "saved", "n": len(req.entries)}
+
+@router.get("/validate-jira")
+async def validate_jira():
+    jira = JiraUtility(HOST, USERNAME, API_TOKEN)
+    jql = f"project = '{PROJECT_KEY}'"
+    try:
+        issues = await jira.get_issues(jql=jql, max_results=1)
+        if issues is None:
+            return {"ok": False, "detail": "No response from Jira - check network/host/auth"}
+        return {"ok": True, "n_issues": len(issues)}
+    except Exception as e:
+        return {"ok": False, "detail": str(e)}

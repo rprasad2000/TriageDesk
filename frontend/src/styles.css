@@ -1,14 +1,291 @@
-.container{max-width:960px;margin:0 auto;padding:24px;font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial}
-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
-nav a{margin-right:12px;text-decoration:none;color:#0366d6}
-nav a.active{font-weight:700}
+/* ---------- Design tokens ---------- */
+:root{
+  /* Brand / theme tokens (Jira-like) */
+  --bg: #F9FAFB;
+  --surface: #FFFFFF;
+  --text: #172B4D;
+  --muted: #6B778C;
+  --brand: #0052CC;
+  --brand-hover: #0065FF;
+  --accent: #0065FF; /* used for nav hover/active */
+  --focus-ring: rgba(76,154,255,0.25);
+  --danger: #DE350B;
+  --success: #36B37E;
+  --warning: #FFAB00;
+  --border: #DFE1E6;
+  --card-shadow: 0 8px 24px rgba(16,24,40,0.06);
+
+  /* Utility tokens used by the stylesheet */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --space-xs: 6px;
+  --space-sm: 8px;
+  --space-md: 12px;
+  --space-lg: 24px;
+  --max-width: 960px;
+
+  /* Shadows (small/medium) */
+  --shadow-sm: 0 1px 3px rgba(16,24,40,0.04);
+  --shadow-md: 0 8px 24px rgba(16,24,40,0.06);
+
+  /* fallbacks for older rules */
+  --soft-border: #ddd;
+}
+
+/* Keep your container but use tokens */
+.container{
+  max-width:var(--max-width);
+  margin:0 auto;
+  padding:var(--space-lg);
+  font-family:system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  color:var(--text);
+  background:var(--bg);
+  -webkit-font-smoothing:antialiased;
+}
+
+/* Header + nav */
+header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;gap:12px}
+nav a{margin-right:12px;text-decoration:none;color:var(--brand);transition:color .18s ease}
+nav a:hover, nav a:focus{color:var(--accent);outline:none}
+nav a.active{font-weight:700;color:var(--accent)}
+
+/* Forms: keep your form grid but improve focus states */
 form{display:grid;gap:12px;margin-bottom:16px}
 label{font-weight:600}
-input,textarea,select,button{padding:10px;border:1px solid #ddd;border-radius:6px;font-size:14px}
-button{cursor:pointer;background:#111;color:white;border:none}
-button.secondary{background:#555}
-.card{border:1px solid #eee;border-radius:10px;padding:14px;margin:8px 0;background:white}
+input,textarea,select{
+  padding:10px;
+  border:1px solid var(--soft-border);
+  border-radius:var(--radius-sm);
+  font-size:14px;
+  transition:box-shadow .12s ease, border-color .12s ease;
+  background: #fff;
+  color:var(--text);
+  outline: none;
+}
+input:focus, textarea:focus, select:focus{
+  border-color:var(--brand);
+  box-shadow: 0 0 0 3px rgba(3,102,214,0.08);
+}
+textarea{min-height:120px;resize:vertical}
+
+/* Disabled / readonly / invalid states */
+input[disabled], textarea[disabled], select[disabled], button[disabled]{
+  opacity:0.6;
+  cursor:not-allowed;
+}
+input[aria-invalid="true"], input.invalid, textarea.invalid{
+  border-color:var(--danger);
+  box-shadow: 0 0 0 3px rgba(217,83,79,0.06);
+}
+
+/* Button primitives (use .btn, .btn-primary, .btn-secondary) */
+button{cursor:pointer;border:0;padding:8px 12px;border-radius:8px;font-size:14px;transition:transform .06s ease, box-shadow .12s ease}
+.btn{display:inline-flex;align-items:center;gap:8px;justify-content:center}
+.btn-primary{
+  /* primary actions should use brand color */
+  background:var(--brand);
+  color:#fff;
+  padding:8px 14px;
+  border-radius:8px;
+  border:1px solid var(--brand);
+}
+.btn-primary:hover:not([disabled]){transform:translateY(-1px);box-shadow:var(--shadow-sm)}
+.btn-secondary{background:#555;color:#fff}
+.btn-ghost{background:transparent;color:var(--brand);border:1px solid transparent}
+.btn:active{transform:translateY(0)}
+/* accessible focus */
+button:focus-visible, .btn:focus-visible{outline:3px solid rgba(3,102,214,0.14);outline-offset:2px}
+
+/* keep your .secondary class for compatibility */
+button.secondary{background:#555;color:white;border:none}
+
+/* Card improvements */
+.card{
+  border:1px solid var(--border);
+  border-radius:var(--radius-md);
+  padding:14px;
+  margin:8px 0;
+  background:var(--surface);
+  box-shadow: var(--shadow-sm);
+  transition:box-shadow .15s ease, transform .08s ease;
+}
+.card:hover{box-shadow:var(--shadow-md);transform:translateY(-2px)}
+
+/* Grid responsive helpers */
 .grid{display:grid;gap:12px}
-.rec{padding:8px;border:1px dashed #ddd;border-radius:8px;margin:6px 0}
+@media (min-width:900px){
+  .grid.cols-2{grid-template-columns:1fr 1fr}
+  .grid.cols-3{grid-template-columns:repeat(3,1fr)}
+}
+@media (max-width:899px){
+  .grid.cols-2, .grid.cols-3{grid-template-columns:1fr}
+}
+
+/* small utilities */
+.rec{padding:8px;border:1px dashed var(--soft-border);border-radius:8px;margin:6px 0}
 pre{background:#fafafa;border:1px solid #eee;padding:8px;border-radius:6px;overflow:auto;max-height:360px}
-small.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#666}
+small.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted)}
+
+/* Badge / pill */
+.badge{display:inline-block;padding:4px 8px;border-radius:999px;background:#f3f6fb;color:var(--brand);font-size:12px;border:1px solid rgba(3,102,214,0.06)}
+.pill{display:inline-block;padding:6px 10px;border-radius:999px;background:#f7f7f8;color:var(--muted);font-size:13px}
+
+/* KPI card */
+.kpi{
+  background:linear-gradient(180deg, #fff 0%, #fbfdff 100%);
+  border-radius:12px;padding:12px;border:1px solid var(--border);
+  box-shadow:var(--shadow-sm);text-align:left;
+}
+.kpi .label{font-size:12px;color:var(--muted)}
+.kpi .value{font-size:22px;font-weight:700;margin-top:6px;color:var(--text)}
+
+/* Spinner (small inline) */
+.spinner{
+  width:18px;height:18px;border-radius:50%;
+  border:2px solid rgba(0,0,0,0.08);border-top-color:var(--brand);
+  animation:spin .85s linear infinite;display:inline-block;vertical-align:middle;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* Skeleton shimmer for loading rows/cards */
+.skeleton{background:linear-gradient(90deg,#f3f3f3 25%, #eee 37%, #f3f3f3 63%);background-size:400% 100%;animation:shimmer 1.2s linear infinite;border-radius:6px}
+@keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+
+/* Table niceties (used in Predict/ Dashboard tables) */
+table{width:100%;border-collapse:collapse}
+thead th{background:#fafafa;position:sticky;top:0;z-index:1;padding:8px;text-align:left;border-bottom:1px solid var(--border)}
+tbody td{padding:8px;border-bottom:1px solid #f3f3f3}
+
+/* small screen tweaks */
+@media (max-width:640px){
+  .container{padding:16px}
+  header{flex-direction:column;align-items:flex-start;gap:8px}
+  .card{padding:12px}
+  .kpi .value{font-size:18px}
+}
+
+/* Recs modal */
+.modal-overlay{
+  position:fixed;
+  inset:0;
+  background:rgba(0,0,0,0.35);
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  z-index:1200;
+  animation: modal-fade .16s ease;
+  padding:20px;
+}
+@keyframes modal-fade{from{opacity:0}to{opacity:1}}
+
+.modal-panel{
+  width: min(920px, 96%);
+  max-width:920px;
+  background:#fff;
+  border-radius:12px;
+  padding:18px;
+  box-shadow: 0 12px 40px rgba(2,6,23,0.2);
+  transform: translateY(6px) scale(.99);
+  animation: modal-pop .18s cubic-bezier(.2,.9,.3,1) forwards;
+  position: relative;
+  h3{ font-size:18px; color:var(--text); }
+  .btn { font-weight:600; }
+}
+@keyframes modal-pop{from{opacity:0;transform:translateY(12px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}}
+
+/* red round close button top-right */
+.modal-close{
+  position:absolute;
+  right:12px;
+  top:12px;
+  width:34px;
+  height:34px;
+  border-radius:50%;
+  border:0;
+  background:#e74c3c;
+  color:white;
+  font-weight:700;
+  cursor:pointer;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+}
+
+/* Jira open button — green arrow capsule */
+.btn-jira{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  width:40px;
+  height:40px;
+  border-radius:999px;
+  background:#2d9a4a;
+  color:#fff;
+  text-decoration:none;
+  font-weight:700;
+  box-shadow: 0 4px 10px rgba(45,154,74,0.12);
+  transition: transform .12s ease, box-shadow .12s ease;
+}
+.btn-jira:hover{ transform: translateY(-2px); box-shadow: 0 8px 18px rgba(45,154,74,0.14); }
+
+/* small Recs button to match Save button style */
+.btn-recs{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  padding:8px 12px;
+  border-radius:8px;
+  background:#111; /* matches your Save button */
+  color:#fff;
+  border: none;
+  cursor:pointer;
+  font-size:14px;
+  transition: transform .08s ease, box-shadow .12s ease;
+}
+.btn-recs:hover{ transform: translateY(-1px); box-shadow: 0 6px 14px rgba(0,0,0,0.08) }
+.btn-recs:active{ transform: translateY(0) }
+.btn-recs[disabled]{ opacity:0.6; cursor:not-allowed }
+
+/* Solid black utility button (legacy style) */
+.btn-dark {
+  background:#111;
+  color:#fff;
+  border:none;
+}
+.btn-dark:hover:not([disabled]){
+  transform:translateY(-1px);
+  box-shadow: var(--shadow-sm);
+}
+
+/* Always-yellow pulsing button */
+.btn-warning {
+  background: #FFAB00; /* Atlassian warning yellow */
+  color: #172B4D;
+  font-weight: 600;
+  border: none;
+  animation: pulse 2s infinite;
+}
+
+.btn-warning:hover:not([disabled]) {
+  background: #FFC400; /* brighter yellow on hover */
+  transform: translateY(-1px);
+  box-shadow: 0 0 12px rgba(255, 171, 0, 0.5);
+}
+
+.btn-warning:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+  animation: none; /* stop pulsing when disabled */
+}
+
+/* Pulse animation */
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 rgba(255,171,0,0.6); }
+  70% { box-shadow: 0 0 0 10px rgba(255,171,0,0); }
+  100% { box-shadow: 0 0 0 0 rgba(255,171,0,0); }
+}
+
+.csv-input{
+  padding:10px;border:1px solid var(--soft-border);border-radius:6px;font-size:14px;
+}

@@ -1,7 +1,17 @@
 // frontend/src/pages/Predict.tsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { useQuery, useMutation, useQueryClient  } from "@tanstack/react-query";
-import { predict, feedback, getSprints, getIssues, predictBulk, feedbackBulk, PredictResponse, getSprintsLive, syncJira } from "../api";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+  predict,
+  feedback,
+  getSprints,
+  getIssues,
+  predictBulk,
+  feedbackBulk,
+  PredictResponse,
+  getSprintsLive,
+  syncJira,
+} from "../api";
 
 type IssueRow = {
   issue_key: string;
@@ -13,15 +23,16 @@ type IssueRow = {
   severity?: string;
   status?: string;
   prediction?: string;
-  confidence_score?: number; // in [0,1] or percent depending on backend
+  confidence_score?: number;
   recommendations?: any[];
   Sprint?: string;
 };
 
 export default function Predict() {
-  
   // Single-text quick classify (existing)
-  const [text, setText] = useState<string>("Login page throws exception when submitting invalid email format.");
+  const [text, setText] = useState<string>(
+    "Login page throws exception when submitting invalid email format."
+  );
   const [topk, setTopk] = useState<number>(5);
 
   const singlePred = useMutation<PredictResponse, Error, void>({
@@ -37,18 +48,41 @@ export default function Predict() {
   });
 
   /* --- New: Sprint-based bulk prediction (use cached live sprints) --- */
-  const { data: sprints = [], isLoading: sprintsLoading, refetch: refetchSprints } = useQuery<string[]>({
+
+  // small helper — shallow equality for issues arrays so we only set local state when data actually changed.
+  const shallowIssuesEqual = (a: IssueRow[] | undefined, b: IssueRow[] | undefined) => {
+    if (a === b) return true;
+    if (!Array.isArray(a) || !Array.isArray(b)) return false;
+    if (a.length !== b.length) return false;
+    // quick heuristic: compare first & last issue_key — cheap and prevents ref-only churn.
+    const a0 = a[0]?.issue_key ?? "";
+    const b0 = b[0]?.issue_key ?? "";
+    const aL = a[a.length - 1]?.issue_key ?? "";
+    const bL = b[b.length - 1]?.issue_key ?? "";
+    return a0 === b0 && aL === bL;
+  };
+
+  // useQuery for sprints: avoid aggressive refetching to reduce UI churn during sync
+  const {
+    data: sprints = [],
+    isLoading: sprintsLoading,
+    refetch: refetchSprints,
+  } = useQuery<string[]>({
     queryKey: ["sprints"],
     queryFn: () => getSprintsLive(false),
+    staleTime: 30_000, // tolerate 30s staleness during sync
+    refetchOnWindowFocus: false,
   });
-
 
   const [selectedSprint, setSelectedSprint] = useState<string>("");
 
-    useEffect(() => {
-      if (!selectedSprint && sprints && sprints.length > 0) setSelectedSprint(sprints[0]);
-    }, [sprints, selectedSprint]);
-
+  // set default selected sprint once when sprints arrive (do NOT depend on selectedSprint)
+  useEffect(() => {
+    if (!selectedSprint && Array.isArray(sprints) && sprints.length > 0) {
+      setSelectedSprint(sprints[0]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sprints]); // only when sprints list changes
 
   const {
     data: issuesFromApi = [],
@@ -60,68 +94,159 @@ export default function Predict() {
     enabled: !!selectedSprint,
   });
 
-    // --- Jira sync helper state ---
+  // --- Jira sync helper state ---
   const [syncing, setSyncing] = useState<boolean>(false);
+  const queryClient = useQueryClient();
 
-    const queryClient = useQueryClient();
+  // Guard ref to avoid double-starting if strict-mode calls twice (syncing state also guards)
+  const syncInProgressRef = useRef(false);
+
+  // DEV: capture unhandled promise rejections to reduce noisy console spam while debugging.
+  useEffect(() => {
+    if (process.env.NODE_ENV === "development") {
+      const onUnhandled = (ev: PromiseRejectionEvent) => {
+        // Log reason but do not swallow app errors — useful to spot extension-origin issues.
+        console.warn("Unhandled promise rejection captured (dev only):", ev.reason);
+      };
+      window.addEventListener("unhandledrejection", onUnhandled);
+      return () => window.removeEventListener("unhandledrejection", onUnhandled);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+
+    /* ========== In-app confirm / message dialogs ========== */
+  // confirm dialog state + resolver ref to allow awaiting user's choice
+  const [confirmOpen, setConfirmOpen] = useState<boolean>(false);
+  const [confirmMessage, setConfirmMessage] = useState<string>("");
+  const confirmResolveRef = useRef<((val: boolean) => void) | null>(null);
+
+  // message dialog state (informational)
+  const [msgOpen, setMsgOpen] = useState<boolean>(false);
+  const [msgText, setMsgText] = useState<string>("");
+
+  // Helper to show confirm dialog and await boolean result
+  const showConfirm = (message: string): Promise<boolean> => {
+    setConfirmMessage(message);
+    setConfirmOpen(true);
+    return new Promise((resolve) => {
+      confirmResolveRef.current = resolve;
+    });
+  };
+
+  // Close confirm and resolve
+  const _closeConfirm = (ok: boolean) => {
+    setConfirmOpen(false);
+    // resolve the awaiting promise
+    try { confirmResolveRef.current?.(ok); } catch (e) { /* ignore */ }
+    confirmResolveRef.current = null;
+  };
+
+  // show a simple message dialog
+  const showMessage = (text: string) => {
+    setMsgText(text);
+    setMsgOpen(true);
+  };
+  const closeMessage = () => setMsgOpen(false);
+
+  // keyboard: ESC closes dialogs
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        if (confirmOpen) _closeConfirm(false);
+        if (msgOpen) closeMessage();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [confirmOpen, msgOpen]);
+
 
   const handleRefreshFromJira = async () => {
-    if (!window.confirm("Refresh from Jira now? This will fetch latest sprints/issues from Jira.")) return;
+    // immediate guard so we never start twice (race-safe)
+    if (syncInProgressRef.current || syncing) {
+      console.warn("Sync already in progress — ignoring duplicate request.");
+      return;
+    }
+    const userOk = await showConfirm("Refresh from Jira now? This will fetch latest sprints/issues from Jira.");
+    if (!userOk) return;
+
+
+    // mark in-progress immediately (prevents double-start)
+    syncInProgressRef.current = true;
     setSyncing(true);
+
     try {
-      // capture current sprint list from react-query cache (may be undefined)
+      // capture current sprints snapshot
       const prevSprints: string[] = (queryClient.getQueryData(["sprints"]) as string[]) || (sprints || []);
-      // start background sync on server
-      const startRes = await syncJira(selectedSprint || undefined, true);
+
+      // call syncJira and ensure we catch any rejection
+      let startRes: any;
+      try {
+        startRes = await syncJira(selectedSprint || undefined, true);
+      } catch (e) {
+        console.error("syncJira request failed:", e);
+        showMessage("Failed to request Jira sync:");
+        return;
+      }
+
       console.info("syncJira start response:", startRes);
 
       if (!startRes || (startRes.status !== "started" && startRes.status !== "ok" && startRes.status !== "cached")) {
-        // If server returned an error-like response, show it (but continue to poll if 'ok')
-        alert("Sync request returned: " + JSON.stringify(startRes));
+        showMessage("Sync request returned: " + JSON.stringify(startRes));
+
       }
 
-      // Poll for updated sprints (force refresh) up to N attempts
-      const maxAttempts = 10;
+      const maxAttempts = 8;
       const delayMs = 2000;
       let success = false;
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        // wait a bit before first poll so the background job gets a chance to run
-        await new Promise((res) => setTimeout(res, delayMs));
 
-        // fetch fresh sprints forcing a Jira read/merge
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        await new Promise((res) => setTimeout(res, delayMs));
         let fresh: string[] = [];
         try {
           fresh = await getSprintsLive(true);
         } catch (err) {
           console.warn("getSprintsLive failed during polling:", err);
-          // continue polling; maybe transient
           fresh = [];
         }
 
-        // If fresh is non-empty and differs from previous, we've updated
+        // quick check: detect meaningful change (length + first/last)
         const prevLen = Array.isArray(prevSprints) ? prevSprints.length : 0;
         const freshLen = Array.isArray(fresh) ? fresh.length : 0;
-        const pickedUpNew = freshLen !== prevLen || (selectedSprint && fresh.includes(selectedSprint));
+        const arraysDiffer =
+          !(
+            Array.isArray(prevSprints) &&
+            prevLen === freshLen &&
+            prevSprints[0] === fresh[0] &&
+            prevSprints[prevLen - 1] === fresh[freshLen - 1]
+          );
+        const pickedUpNew = (freshLen > 0 && arraysDiffer) || (selectedSprint && fresh.includes(selectedSprint));
 
-        if (pickedUpNew && freshLen > 0) {
-          // update react-query cache so your useQuery() sees new sprints immediately
+        if (pickedUpNew) {
+          // Only write to cache if content actually changed to avoid churn
           queryClient.setQueryData(["sprints"], fresh);
-          // also refetch the issues for the currently selected sprint (if any)
-          if (selectedSprint) {
-            // small delay to allow corpus write to complete
-            await new Promise((res) => setTimeout(res, 800));
-            refetchIssues();
+          // small delay to allow backend corpus write to finish then refetch issues
+          if (selectedSprint) await new Promise((res) => setTimeout(res, 800));
+          try {
+            await refetchIssues();
+          } catch (e) {
+            console.warn("refetchIssues failed after sync:", e);
           }
           success = true;
           break;
         }
+
+        // if we were on last attempt, still attempt a final update if fresh non-empty and prev empty
+        if (attempt === maxAttempts - 1 && freshLen > 0 && (!Array.isArray(prevSprints) || prevLen === 0)) {
+          queryClient.setQueryData(["sprints"], fresh);
+        }
       }
 
       if (success) {
-        alert("Jira sync completed and sprints refreshed.");
+        showMessage("Jira sync completed and sprints refreshed.");
       } else {
-        alert("Sync started but new sprints not detected within timeout. Try Refresh again in a few seconds.");
-        // still trigger a forced update once more for UI
+        showMessage("Sync started but new sprints not detected within timeout. Try Refresh again in a few seconds.");
         try {
           const final = await getSprintsLive(true);
           if (Array.isArray(final) && final.length > 0) queryClient.setQueryData(["sprints"], final);
@@ -131,32 +256,49 @@ export default function Predict() {
       }
     } catch (err: any) {
       console.error("Sync from Jira failed:", err);
-      alert("Sync failed: " + (err?.message || err));
+      showMessage("Sync failed: " + (err?.message || String(err)));
     } finally {
       setSyncing(false);
+      syncInProgressRef.current = false;
     }
   };
-  
 
-// const [issues, setIssues] = useState<IssueRow[]>([]);
-// useEffect(() => {
-//   setIssues(Array.isArray(issuesFromApi) ? issuesFromApi : []);
-// }, [issuesFromApi]);
-
+  // keep local `issues` state but only update it when content actually changed (prevents setState churn)
   const [issues, setIssues] = useState<IssueRow[]>([]);
-
-// useEffect(() => {
-//   setIssues(Array.isArray(issuesFromApi) ? [...issuesFromApi] : []);
-// }, [issuesFromApi.length]); // Depend on length instead of the array reference
-
-  const prevIssuesRef = useRef(issuesFromApi);
+  const prevIssuesRef = useRef<IssueRow[] | undefined>(undefined);
 
   useEffect(() => {
-    if (issuesFromApi !== prevIssuesRef.current) {
-      prevIssuesRef.current = issuesFromApi;
+    if (!shallowIssuesEqual(issuesFromApi, prevIssuesRef.current)) {
+      prevIssuesRef.current = issuesFromApi ? [...issuesFromApi] : undefined;
       setIssues(Array.isArray(issuesFromApi) ? [...issuesFromApi] : []);
     }
+    // depend only on the data itself
   }, [issuesFromApi]);
+
+  // Modal state for recommendations popup
+  const [recsModalOpen, setRecsModalOpen] = useState<boolean>(false);
+  const [recsModalItems, setRecsModalItems] = useState<any[] | null>(null);
+  const [recsModalTitle, setRecsModalTitle] = useState<string>("");
+
+// open modal helper
+
+  const openRecsModal = (items: any[] | null | undefined, title = "") => {
+    setRecsModalItems(items ?? []);
+    setRecsModalTitle(title || "Recommendations");
+    setRecsModalOpen(true);
+  };
+
+
+// close modal helper
+  const closeRecsModal = () => {
+    setRecsModalOpen(false);
+    // small delay to clear content (optional)
+    setTimeout(() => {
+      setRecsModalItems(null);
+      setRecsModalTitle("");
+    }, 160);
+  };
+
 
   const [selectedMap, setSelectedMap] = useState<Record<string, boolean>>({});
   const toggleSelect = (key: string) => setSelectedMap((p) => ({ ...p, [key]: !p[key] }));
@@ -171,7 +313,7 @@ export default function Predict() {
 
   // Bulk predict mutation: expects array of issue keys
   const bulkPredictMut = useMutation<
-    { predictions: any[] }, // return type from /predict/bulk
+    { predictions: any[] },
     Error,
     string[]
   >({
@@ -208,7 +350,7 @@ export default function Predict() {
       return await feedbackBulk(entries);
     },
     onSuccess: () => {
-      // keep inputs as-is (user can see)
+      // keep inputs as-is
     },
     onError: (err) => {
       console.error("Bulk feedback save failed:", err);
@@ -239,7 +381,7 @@ export default function Predict() {
   const handleRowFeedback = (issue: IssueRow) => {
     const key = issue.issue_key;
     const label = fbInputs[key];
-    if (!label || !label.trim()) return alert("Enter a label to save as feedback.");
+    if (!label || !label.trim()) return showMessage("Enter a label to save as feedback.");
     const textFor = issue.ticket_description || issue.description || "";
     bulkFeedbackMut.mutate([{ issue_key: key, text: textFor, true_label: label, source: "user" }]);
   };
@@ -256,7 +398,7 @@ export default function Predict() {
         };
       })
       .filter((e) => e.true_label && e.true_label.trim());
-    if (entries.length === 0) return alert("Enter labels in the input boxes for selected rows.");
+    if (entries.length === 0) return showMessage("Enter labels in the input boxes for selected rows.");
     bulkFeedbackMut.mutate(entries);
   };
 
@@ -281,7 +423,7 @@ export default function Predict() {
           <label>Top-K similar</label>
           <input type="number" value={topk} onChange={(e) => setTopk(parseInt(e.target.value || "1") || 1)} min={1} />
           <div style={{ marginTop: 8 }}>
-            <button disabled={singlePredLoading}>{singlePredLoading ? "Classifying…" : "Classify"}</button>
+            <button className="btn-dark" disabled={singlePredLoading}>{singlePredLoading ? "Classifying…" : "Classify"}</button>
           </div>
         </form>
 
@@ -327,7 +469,7 @@ export default function Predict() {
                   if (el?.value) {
                     singleFb.mutate({ true_label: el.value });
                   } else {
-                    alert("Enter a label");
+                    showMessage("Enter a label");
                   }
                 }}
               >
@@ -354,27 +496,32 @@ export default function Predict() {
             ))}
           </select>
 
-          <button onClick={() => refetchIssues()} disabled={!selectedSprint || issuesLoading} style={{ marginLeft: 8 }}>
-            {issuesLoading ? "Loading…" : "Load issues"}
+          <button
+              onClick={() => refetchIssues()}
+              disabled={!selectedSprint || issuesLoading}
+              className="btn btn-dark btn-pill"
+            >
+              {issuesLoading ? <span className="spinner" /> : "Load issues"}
           </button>
+
 
           <button
             onClick={handleRefreshFromJira}
             disabled={syncing}
+            className={`btn btn-warning btn-pill`}
             title="Fetch latest sprints & issues from Jira"
-            style={{ marginLeft: 8 }}
           >
-            {syncing ? "Syncing…" : "Refresh from Jira"}
+            {syncing ? <><span className="spinner" /> Syncing…</> : "Refresh from Jira"}
           </button>
 
 
           <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-            <button onClick={() => selectAllVisible(true)}>Select all</button>
-            <button onClick={() => selectAllVisible(false)}>Clear</button>
-            <button onClick={handlePredictSelected} disabled={bulkPredictLoading || selectedKeys.length === 0}>
+            <button className="btn btn-dark" onClick={() => selectAllVisible(true)}>Select all</button>
+            <button className="btn btn-dark" onClick={() => selectAllVisible(false)}>Clear</button>
+            <button className="btn btn-dark" onClick={handlePredictSelected} disabled={bulkPredictLoading || selectedKeys.length === 0}>
               {bulkPredictLoading ? "Predicting…" : `Predict selected (${selectedKeys.length})`}
             </button>
-            <button onClick={handlePredictAllVisible} disabled={bulkPredictLoading || issues.length === 0}>
+            <button className="btn btn-dark" onClick={handlePredictAllVisible} disabled={bulkPredictLoading || issues.length === 0}>
               {bulkPredictLoading ? "Predicting…" : "Predict all visible"}
             </button>
           </div>
@@ -413,29 +560,24 @@ export default function Predict() {
                       : "-"}
                   </td>
                   <td style={{ padding: 6, display: "flex", gap: 8, alignItems: "center" }}>
-                    <button onClick={() => handleRowPredict(it.issue_key)}>Predict</button>
-                    <input
-                      placeholder="Correct label"
-                      value={fbInputs[it.issue_key] || ""}
-                      onChange={(e) => setFbInput(it.issue_key, e.target.value)}
-                      style={{ width: 130 }}
-                    />
-                    <button onClick={() => handleRowFeedback(it)}>Save</button>
+                    <button className="btn-primary" onClick={() => handleRowPredict(it.issue_key)}>Predict</button>
+                    <input placeholder="Correct label" value={fbInputs[it.issue_key] || ""} onChange={(e) => setFbInput(it.issue_key, e.target.value)} style={{ width: 130 }} />
+                    <button className="btn-dark btn-pill" onClick={() => handleRowFeedback(it)}>Save</button>
+                    {/* replace old Recs button with this */}
                     {!!it.recommendations?.length && (
-                      <details style={{ marginLeft: 6 }}>
-                        <summary style={{ cursor: "pointer" }}>Recs</summary>
-                        <div style={{ padding: 6 }}>
-                          {it.recommendations.map((r: any, i: number) => (
-                            <div key={i} style={{ marginBottom: 6 }}>
-                              <div>
-                                <b>{r.issue_key}</b> — {r.summary}
-                              </div>
-                              <small className="mono">sim: {r.similarity?.toFixed(3)}</small>
-                            </div>
-                          ))}
-                        </div>
-                      </details>
+                      <button
+                        className="btn-dark"
+                        style={{ marginLeft: 6 }}
+                        onClick={() => openRecsModal(it.recommendations ?? null, `Similar tickets — ${it.issue_key}`)}
+                        aria-label={`Open similar tickets for ${it.issue_key}`}
+                        type="button"
+                      >
+                        View similar
+                      </button>
+                      
                     )}
+
+
                   </td>
                 </tr>
               ))}
@@ -444,18 +586,98 @@ export default function Predict() {
         </div>
 
         <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
-          <button onClick={handleBulkFeedbackFromSelected} disabled={bulkFeedbackLoading || selectedKeys.length === 0}>
+          <button className="btn-dark" onClick={handleBulkFeedbackFromSelected} disabled={bulkFeedbackLoading || selectedKeys.length === 0}>
             {bulkFeedbackLoading ? "Saving…" : `Save feedback for selected (${selectedKeys.length})`}
           </button>
-          <button
+          {/* <button
             onClick={() => {
               refetchIssues();
             }}
           >
             Refresh
-          </button>
+          </button> */}
         </div>
       </div>
+      {/* Recommendations modal */}
+{recsModalOpen && (
+  <div
+    role="dialog"
+    aria-modal="true"
+    className="modal-overlay"
+    onClick={(e) => {
+      // click on overlay closes modal
+      if (e.target === e.currentTarget) closeRecsModal();
+    }}
+  >
+    <div className="modal-panel" role="document">
+      <button className="modal-close" onClick={closeRecsModal} aria-label="Close recommendations">✕</button>
+      <h3 style={{ marginTop: 0 }}>{recsModalTitle}</h3>
+      <div style={{ maxHeight: "60vh", overflow: "auto", marginTop: 8 }}>
+        {Array.isArray(recsModalItems) && recsModalItems.length > 0 ? (
+          recsModalItems.map((r: any, i: number) => (
+            <div key={i} style={{ padding: 10, borderBottom: "1px solid #f3f3f3", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 700 }}>{r.issue_key || "(no key)"} {r.label ? <span style={{ fontWeight: 500, marginLeft: 8, color: "#666" }}>— {r.label}</span> : null}</div>
+                <div style={{ marginTop: 6 }}>{r.summary}</div>
+                <small className="mono">similarity: {typeof r.similarity === "number" ? r.similarity.toFixed(3) : "-"}</small>
+              </div>
+
+              <div style={{ marginLeft: 12, display: "flex", gap: 8, alignItems: "center" }}>
+                {!!r.url && (
+                  <a
+                    className="btn-jira"
+                    href={r.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title="Open in Jira"
+                    onClick={(e) => {
+                      // keep default behaviour (open in new tab)
+                    }}
+                  >
+                    ➜
+                  </a>
+                )}
+              </div>
+            </div>
+          ))
+        ) : (
+          <div style={{ padding: 12 }}>No recommendations available.</div>
+        )}
+      </div>
+    </div>
+  </div>
+)}
+
+{/* ===== Confirm modal (awaitable) ===== */}
+{confirmOpen && (
+  <div className="modal-overlay" role="dialog" aria-modal="true" onClick={(e) => { if (e.target === e.currentTarget) _closeConfirm(false); }}>
+    <div className="modal-panel" role="document" style={{ maxWidth: 560 }}>
+      <h3 style={{ marginTop: 0 }}>Confirm</h3>
+      <div style={{ marginTop: 8, color: "var(--muted)" }}>{confirmMessage}</div>
+
+      <div style={{ display: "flex", gap: 12, justifyContent: "flex-end", marginTop: 18 }}>
+        <button className="btn btn-ghost btn-pill" onClick={() => _closeConfirm(false)} type="button">Cancel</button>
+        <button className="btn btn-primary btn-pill" onClick={() => _closeConfirm(true)} type="button">OK</button>
+      </div>
+    </div>
+  </div>
+)}
+
+{/* ===== Message modal (informational) ===== */}
+{msgOpen && (
+  <div className="modal-overlay" role="dialog" aria-modal="true" onClick={(e) => { if (e.target === e.currentTarget) closeMessage(); }}>
+    <div className="modal-panel" role="document" style={{ maxWidth: 560 }}>
+      <h3 style={{ marginTop: 0 }}>Message</h3>
+      <div style={{ marginTop: 8, color: "var(--muted)" }}>{msgText}</div>
+
+      <div style={{ display: "flex", gap: 12, justifyContent: "flex-end", marginTop: 18 }}>
+        <button className="btn btn-primary btn-pill" onClick={() => closeMessage()} type="button">OK</button>
+      </div>
+    </div>
+  </div>
+)}
+
+
     </div>
   );
 }

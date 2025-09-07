@@ -99,8 +99,8 @@ def _ensure_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     priority = pick_col(["priority"]).astype(str)
     status = pick_col(["status"]).astype(str)
-    severity = pick_col(["severity", "customfield_10106"]).astype(str)
-    root_cause = pick_col(["root_cause", "rootcause", "customfield_10104"]).astype(str)
+    severity = pick_col(["severity", "customfield_10125"]).astype(str)
+    root_cause = pick_col(["root_cause", "rootcause", "customfield_10126"]).astype(str)
 
     # sprint: any column name containing 'sprint'
     sprint_col = next((cols[k] for k in cols if "sprint" in k), None)
@@ -300,8 +300,8 @@ def build_df_from_jira_issues(issues: List[Dict[str, Any]], host: str) -> pd.Dat
         priority = (fields.get("priority") or {}).get("name", "") or ""
 
         # your project’s custom fields (adjust IDs if different)
-        severity = fields.get("customfield_10106", "") or ""
-        root_cause = fields.get("customfield_10104", "") or ""
+        severity = fields.get("customfield_10125", "") or ""
+        root_cause = fields.get("customfield_10126", "") or ""
 
         # labels (single-label for classifier)
         labels_list = fields.get("labels") or []

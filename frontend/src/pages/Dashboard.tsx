@@ -1,7 +1,7 @@
 // src/pages/Dashboard.tsx
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useEffect, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, syncBoard  } from "../api";
+import { api, syncBoard } from "../api";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, Brush, BarChart, Bar, PieChart, Pie, Cell,
@@ -53,53 +53,130 @@ const sprintSortKey = (label: string): [number, number] => {
 
 const QUARTER_LABEL = (d: dayjs.Dayjs) => `Q${d.quarter()}-${d.year()}`;
 const COLORS = ["#8884d8", "#82ca9d", "#ffc658", "#ff7f50", "#8dd1e1", "#a4de6c", "#d0ed57", "#d66ad1"];
-const HIGH_SEV = new Set(["Blocker", "Critical", "High"]);
-const monthNames = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+// Updated HIGH_SEV to actual severity values (Blocker, Critical, Major)
+const HIGH_SEV = new Set(["Blocker", "Critical", "Major"]);
+const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 export default function Dashboard() {
   const queryClient = useQueryClient();
   const [yearFilter, setYearFilter] = useState<string>("All");
-  const [viewBy, setViewBy] = useState<"sprint"|"month"|"quarter">("sprint");
+  const [viewBy, setViewBy] = useState<"sprint" | "month" | "quarter">("sprint");
   const [monthFilter, setMonthFilter] = useState<string>("All"); // '1'..'12' or 'All'
   const [sprintFilter, setSprintFilter] = useState<string>("All");
   const [syncingBoard, setSyncingBoard] = useState<boolean>(false);
   const [liveKPIs, setLiveKPIs] = useState<KPIData | null>(null);
-  
+
+  /* ===== in-app confirm/message dialogs (replaces window.confirm/alert) ===== */
+  const [confirmOpen, setConfirmOpen] = useState<boolean>(false);
+  const [confirmMessage, setConfirmMessage] = useState<string>("");
+  const confirmResolveRef = useRef<((val: boolean) => void) | null>(null);
+
+  const [msgOpen, setMsgOpen] = useState<boolean>(false);
+  const [msgText, setMsgText] = useState<string>("");
+
+  const showConfirm = (message: string): Promise<boolean> => {
+    setConfirmMessage(message);
+    setConfirmOpen(true);
+    return new Promise((resolve) => {
+      confirmResolveRef.current = resolve;
+    });
+  };
+  const _closeConfirm = (ok: boolean) => {
+    setConfirmOpen(false);
+    try { confirmResolveRef.current?.(ok); } catch (e) { /* ignore */ }
+    confirmResolveRef.current = null;
+  };
+
+  const showMessage = (text: string) => {
+    setMsgText(text);
+    setMsgOpen(true);
+  };
+  const closeMessage = () => setMsgOpen(false);
+
+  // ESC to close dialogs
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        if (confirmOpen) _closeConfirm(false);
+        if (msgOpen) closeMessage();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [confirmOpen, msgOpen]);
+
+  // inside Dashboard component — replace existing handleRefreshBoard with this
+  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+
+  const computeKpisFromIncidents = (incidents: Incident[] | undefined) => {
+    if (!Array.isArray(incidents)) return { total: 0, open: 0, closed: 0, highSeverity: 0 };
+    const total = incidents.length;
+    let open = 0, closed = 0, highSeverity = 0;
+    const HIGH_SEVERITIES = new Set(["Blocker", "Critical", "Major"]);
+    for (const it of incidents) {
+      const st = (it.status || "").toLowerCase();
+      if (st.includes("done") || st.includes("closed") || st.includes("resolved")) closed++;
+      else open++;
+      if (HIGH_SEVERITIES.has((it.severity || "").trim())) highSeverity++;
+    }
+    return { total, open, closed, highSeverity };
+  };
+
+
+  // replace your existing handleRefreshBoard with this exact function
   const handleRefreshBoard = async () => {
-  if (!window.confirm("Refresh board from Jira? This will fetch the latest dashboard data (no model changes).")) return;
+  const ok = await showConfirm("Refresh board from Jira? This will fetch the latest dashboard data (no model changes).");
+  if (!ok) return;
   setSyncingBoard(true);
 
   try {
-    // Trigger backend sync
-    const res = await syncBoard(5000);
+    // call backend: persist=true to overwrite corpus immediately
+    // Use POST to pass persist flag — adjust path if you have a helper 'syncBoard' wrapper
+    const res = await api.post("/sync/board", { max_results: 5000, persist: true }).then(r => r.data);
 
-    // Immediately update KPIs if provided
+    // update live KPIs from returned lightweight kpis
     if (res?.kpis) {
       setLiveKPIs({
-        total: Number(res.kpis.total ?? 0),
+        total: Number(res.kpis.total ?? res.n_issues ?? 0),
         open: Number(res.kpis.open ?? 0),
-        closed: Number(res.kpis.closed ?? 0),
+        closed: Number(res.kpis.closed ?? (Number(res.kpis.total ?? 0) - Number(res.kpis.open ?? 0))),
         highSeverity: Number(res.kpis.highSeverity ?? 0),
       });
     }
 
-    // ✅ Fire success alert immediately after updating KPIs
-    alert("Board refresh started. Data will sync shortly.");
+    // immediate user feedback
+    showMessage("Board refresh completed and KPIs updated.");
 
-    // Kick off refetch in background to refresh all data
-    await queryClient.invalidateQueries({ queryKey: ["incidents", "all"] });
+    // Invalidate queries (mark stale) AND set fresh incidents cache so UI updates immediately
+    // 1) mark stale so background refetch can still happen
+    queryClient.invalidateQueries({ queryKey: ["incidents", "all"] });
+    queryClient.invalidateQueries({ queryKey: ["sprints"] });
 
-    refetch().finally(() => setLiveKPIs(null));
+    // 2) fetch fresh incidents and write into cache immediately (non-blocking to user)
+    // note: this ensures "Total Defects" and table align to Jira immediately
+    api.get("/incidents", { params: { max_results: 5000 } })
+      .then(r => r.data)
+      .then((freshIncidents: any[]) => {
+        // set the query data (immediate)
+        queryClient.setQueryData(["incidents", "all"], freshIncidents);
+        // optionally clear liveKPIs after heavy refresh completes — keep little delay so user sees immediate numbers
+        setTimeout(() => setLiveKPIs(null), 800);
+      })
+      .catch(err => {
+        console.error("Background incidents fetch failed:", err);
+        // leave liveKPIs so user sees counts returned by sync_board
+        setLiveKPIs(prev => prev);
+      });
 
   } catch (err: any) {
     console.error("Refresh board failed:", err);
-    alert("Board refresh failed: " + (err?.message || err));
+    showMessage("Board refresh failed: " + (err?.message || String(err)));
     setLiveKPIs(null);
   } finally {
     setSyncingBoard(false);
   }
 };
-
 
 
   const { data, isLoading, isError, error, refetch } = useQuery<Incident[]>({
@@ -168,17 +245,17 @@ export default function Dashboard() {
       const d = parseDate(i.creation_time);
       if (!d) continue;
       // apply monthFilter if set
-      if (monthFilter !== "All" && String(d.month()+1) !== monthFilter) continue;
+      if (monthFilter !== "All" && String(d.month() + 1) !== monthFilter) continue;
       // apply sprintFilter if set (when user wants to restrict by sprint)
       if (sprintFilter !== "All" && String(i.Sprint || "") !== sprintFilter) continue;
-      const key = `${d.year()}-${String(d.month()+1).padStart(2,"0")}`;
+      const key = `${d.year()}-${String(d.month() + 1).padStart(2, "0")}`;
       monthCounts[key] = (monthCounts[key] || 0) + 1;
     }
     const monthSeries = Object.keys(monthCounts)
-      .sort((a,b) => new Date(a + "-01").getTime() - new Date(b + "-01").getTime())
+      .sort((a, b) => new Date(a + "-01").getTime() - new Date(b + "-01").getTime())
       .map(k => {
-        const [y,m] = k.split("-");
-        const monthLabel = monthNames[Number(m)-1] ?? m;
+        const [y, m] = k.split("-");
+        const monthLabel = monthNames[Number(m) - 1] ?? m;
         return { period: k, label: `${monthLabel}-${y}`, count: monthCounts[k] };
       });
 
@@ -194,7 +271,18 @@ export default function Dashboard() {
       quarterMap[q] ??= {};
       quarterMap[q][sev] = (quarterMap[q][sev] || 0) + 1;
     }
-    const severitiesOrdered = Array.from(sevSet);
+
+    // canonical severity ordering for chart consistency
+    const canonicalSeverityOrder = ["Blocker", "Critical", "Major", "Minor", "Unknown"];
+    const severitiesOrdered = Array.from(sevSet).sort((a, b) => {
+      const ia = canonicalSeverityOrder.indexOf(a);
+      const ib = canonicalSeverityOrder.indexOf(b);
+      if (ia === -1 && ib === -1) return String(a).localeCompare(String(b));
+      if (ia === -1) return 1;
+      if (ib === -1) return -1;
+      return ia - ib;
+    });
+
     const quarterSeveritySeries = Object.entries(quarterMap)
       .map(([quarter, sevCounts]) => ({ quarter, ...sevCounts }))
       .sort((a, b) => {
@@ -208,32 +296,36 @@ export default function Dashboard() {
         return a.quarter.localeCompare(b.quarter);
       });
 
-    // priority breakdown
+    // priority breakdown (canonical order High, Medium, Low)
     const prCounts: Record<string, number> = {};
     for (const i of filtered) {
       const p = (i.priority || "Unknown").trim();
       prCounts[p] = (prCounts[p] || 0) + 1;
     }
-    const priorityBreakdown = Object.entries(prCounts)
-      .map(([name, value]) => ({ name, value }))
-      .sort((a, b) => b.value - a.value);
+    const canonicalPriorities = ["High", "Medium", "Low"];
+    const priorityBreakdownOrdered = [
+      ...canonicalPriorities.map(p => ({ name: p, value: prCounts[p] || 0 })).filter(x => x.value > 0),
+      ...Object.entries(prCounts)
+        .filter(([k]) => !canonicalPriorities.includes(k))
+        .map(([name, value]) => ({ name, value }))
+    ];
 
     return {
-      yearsInData: Array.from(yearsSet).sort((a,b)=>b-a),
+      yearsInData: Array.from(yearsSet).sort((a, b) => b - a),
       rows: filtered,
       sprintSeries,
       monthSeries,
       quarterSeveritySeries,
       severitiesOrdered,
-      priorityBreakdown,
+      priorityBreakdown: priorityBreakdownOrdered,
       kpis: { total, open, closed, highSeverity },
-      availableMonths: Array.from(monthsSet).sort((a,b)=>a-b),
+      availableMonths: Array.from(monthsSet).sort((a, b) => a - b),
       availableSprints: Array.from(sprintsSet).sort(),
     };
   }, [data, yearFilter, monthFilter, sprintFilter]);
 
   // Use live KPIs if available, otherwise use computed KPIs
-  const displayKPIs = liveKPIs || kpis;
+  const displayKPIs = liveKPIs || (kpis as any);
 
   const sprintChartWidth = Math.max(900, (viewBy === "sprint" ? sprintSeries.length : monthSeries.length) * 120);
   const quarterChartWidth = Math.max(800, quarterSeveritySeries.length * 160);
@@ -282,15 +374,19 @@ export default function Dashboard() {
           <label style={{ marginLeft: 8, marginRight: 8 }}>Month:</label>
           <select value={monthFilter} onChange={(e) => setMonthFilter(e.target.value)}>
             <option value="All">All</option>
-            {availableMonths.map(m => <option key={m} value={String(m)}>{monthNames[m-1]} ({m})</option>)}
+            {availableMonths.map(m => <option key={m} value={String(m)}>{monthNames[m - 1]} ({m})</option>)}
           </select>
         </div>
         <button
           onClick={handleRefreshBoard}
           disabled={syncingBoard}
-          style={{ marginLeft: "auto", padding: "6px 12px", background: "black", color: "white", border: "none", borderRadius: 4 }}>
-          {syncingBoard ? "Syncing..." : "Refresh Board"}
+          className="btn btn-warning btn-pill"
+          style={{ marginLeft: "auto" }}
+          title="Refresh board from Jira"
+        >
+          {syncingBoard ? <><span className="spinner" /> Syncing…</> : "Refresh Board"}
         </button>
+
       </div>
 
       <div style={{
@@ -309,7 +405,7 @@ export default function Dashboard() {
       <div style={{ border: "1px solid #ddd", borderRadius: 6, padding: 8, overflowX: "auto", maxHeight: 380 }}>
         <div style={{ width: sprintChartWidth, height: 320 }}>
           <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={topSeries} margin={{ left: 12, right: 24, bottom:40 }}>
+            <LineChart data={topSeries} margin={{ left: 12, right: 24, bottom: 40 }}>
               <CartesianGrid strokeDasharray="3 3" />
               <XAxis dataKey="label" interval={0} angle={-20} dy={10} />
               <YAxis allowDecimals={false} />
@@ -391,6 +487,33 @@ export default function Dashboard() {
           </tbody>
         </table>
       </div>
+      {/* Confirm modal */}
+{confirmOpen && (
+  <div className="modal-overlay" role="dialog" aria-modal="true" onClick={(e) => { if (e.target === e.currentTarget) _closeConfirm(false); }}>
+    <div className="modal-panel" role="document" style={{ maxWidth: 560 }}>
+      <h3 style={{ marginTop: 0 }}>Confirm</h3>
+      <div style={{ marginTop: 8, color: "var(--muted)" }}>{confirmMessage}</div>
+      <div style={{ display: "flex", gap: 12, justifyContent: "flex-end", marginTop: 18 }}>
+        <button className="btn btn-ghost btn-pill" onClick={() => _closeConfirm(false)} type="button">Cancel</button>
+        <button className="btn btn-primary btn-pill" onClick={() => _closeConfirm(true)} type="button">OK</button>
+      </div>
+    </div>
+  </div>
+)}
+
+{/* Message modal */}
+{msgOpen && (
+  <div className="modal-overlay" role="dialog" aria-modal="true" onClick={(e) => { if (e.target === e.currentTarget) closeMessage(); }}>
+    <div className="modal-panel" role="document" style={{ maxWidth: 560 }}>
+      <h3 style={{ marginTop: 0 }}>Message</h3>
+      <div style={{ marginTop: 8, color: "var(--muted)" }}>{msgText}</div>
+      <div style={{ display: "flex", gap: 12, justifyContent: "flex-end", marginTop: 18 }}>
+        <button className="btn btn-primary btn-pill" onClick={() => closeMessage()} type="button">OK</button>
+      </div>
+    </div>
+  </div>
+)}
+
     </div>
   );
 }

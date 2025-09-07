@@ -1,7 +1,7 @@
 import axios from "axios";
 
-const baseURL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8001/api/v1/ml";
-export const api = axios.create({ baseURL });
+const API_URL = import.meta.env.VITE_API_URL || import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8001/api/v1/ml";
+export const api = axios.create({ baseURL: API_URL });
 
 export type TrainResponse = { message: string; trained: boolean; classes: string[]; n_samples: number; metrics: any };
 export type PredictResponse = { prediction: string; confidence: number; recommendations: any[] };

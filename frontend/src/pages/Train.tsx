@@ -198,9 +198,15 @@ const renderResult = (data: any) => {
 
       <div className="card">
         <h3>Train from Jira</h3>
-        <button onClick={() => mJira.mutate()} disabled={mJira.isPending}>
-          {mJira.isPending ? "Training..." : "Train from Jira"}
+        <button
+          type="button"
+          className="btn btn-primary btn-pill"
+          onClick={() => mJira.mutate()}
+          disabled={mJira.isPending}
+        >
+          {mJira.isPending ? <><span className="spinner" /> Training...</> : "Train from Jira"}
         </button>
+
         {renderResult(mJira.data)}
       </div>
 
@@ -209,11 +215,19 @@ const renderResult = (data: any) => {
         <input
           value={csvPath}
           onChange={(e) => setCsvPath(e.target.value)}
+          className="csv-input"
           style={{ marginRight: "0.5rem" }}
         />
-        <button onClick={() => mCsv.mutate()} disabled={mCsv.isPending}>
-          {mCsv.isPending ? "Training..." : "Train from CSV"}
+
+        <button
+          type="button"
+          className="btn btn-primary btn-pill"
+          onClick={() => mCsv.mutate()}
+          disabled={mCsv.isPending}
+        >
+          {mCsv.isPending ? <><span className="spinner" /> Training...</> : "Train from CSV"}
         </button>
+
         {renderResult(mCsv.data)}
       </div>
     </div>
