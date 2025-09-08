@@ -1,7 +1,7 @@
 // src/pages/Dashboard.tsx
 import React, { useMemo, useState, useEffect, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, syncBoard } from "../api";
+import { api, syncBoard, getSprintsLive  } from "../src/api";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, Brush, BarChart, Bar, PieChart, Pie, Cell,
@@ -9,6 +9,9 @@ import {
 import dayjs from "dayjs";
 import quarterOfYear from "dayjs/plugin/quarterOfYear";
 dayjs.extend(quarterOfYear);
+
+
+
 
 type Incident = {
   incident_no: string;
@@ -65,6 +68,36 @@ export default function Dashboard() {
   const [sprintFilter, setSprintFilter] = useState<string>("All");
   const [syncingBoard, setSyncingBoard] = useState<boolean>(false);
   const [liveKPIs, setLiveKPIs] = useState<KPIData | null>(null);
+
+  // Priority modal state (add near other useState declarations)
+const [priorityModalOpen, setPriorityModalOpen] = useState(false);
+const [priorityModalKey, setPriorityModalKey] = useState<string | null>(null);
+const [priorityFilterText, setPriorityFilterText] = useState("");
+const [priorityPage, setPriorityPage] = useState<number>(0);
+const PRIORITY_PAGE_SIZE = 25;
+
+const openPriorityModal = (pkey: string) => {
+  setPriorityModalKey(pkey);
+  setPriorityFilterText("");
+  setPriorityPage(0);
+  setPriorityModalOpen(true);
+};
+const closePriorityModal = () => setPriorityModalOpen(false);
+  
+// modal state
+const [labelModalOpen, setLabelModalOpen] = useState(false);
+const [labelModalName, setLabelModalName] = useState<string | null>(null);
+
+const openLabelModal = (name: string) => { setLabelModalName(name); setLabelModalOpen(true); };
+const closeLabelModal = () => { setLabelModalOpen(false); setLabelModalName(null); };
+
+
+
+
+
+
+
+
 
   /* ===== in-app confirm/message dialogs (replaces window.confirm/alert) ===== */
   const [confirmOpen, setConfirmOpen] = useState<boolean>(false);
@@ -125,50 +158,59 @@ export default function Dashboard() {
 
 
   // replace your existing handleRefreshBoard with this exact function
-  const handleRefreshBoard = async () => {
+const handleRefreshBoard = async () => {
   const ok = await showConfirm("Refresh board from Jira? This will fetch the latest dashboard data (no model changes).");
   if (!ok) return;
   setSyncingBoard(true);
 
   try {
-    // call backend: persist=true to overwrite corpus immediately
-    // Use POST to pass persist flag — adjust path if you have a helper 'syncBoard' wrapper
-    const res = await api.post("/sync/board", { max_results: 5000, persist: true }).then(r => r.data);
+    // Force backend to fetch fresh Jira data and update the corpus (synchronous path)
+    // getSprintsLive(true) calls GET /sprints?refresh=true which merges/writes corpus on server
+    const sprints = await getSprintsLive(true).catch((e) => {
+      console.warn("getSprintsLive(refresh) failed:", e);
+      return null;
+    });
 
-    // update live KPIs from returned lightweight kpis
-    if (res?.kpis) {
-      setLiveKPIs({
-        total: Number(res.kpis.total ?? res.n_issues ?? 0),
-        open: Number(res.kpis.open ?? 0),
-        closed: Number(res.kpis.closed ?? (Number(res.kpis.total ?? 0) - Number(res.kpis.open ?? 0))),
-        highSeverity: Number(res.kpis.highSeverity ?? 0),
+    // After refresh attempt, fetch fresh incidents (this will read the updated corpus on server)
+    const freshIncidents = await api
+      .get("/incidents", { params: { max_results: 5000 } })
+      .then((r) => r.data)
+      .catch((e) => {
+        console.error("Failed to fetch incidents after sync:", e);
+        return null;
       });
+
+    if (Array.isArray(freshIncidents)) {
+      // update the cached query so UI is updated immediately
+      queryClient.setQueryData(["incidents", "all"], freshIncidents);
+      // update sprints cache if backend returned them
+      if (Array.isArray(sprints)) {
+        queryClient.setQueryData(["sprints"], sprints);
+      }
+      // update live KPIs using the same client-side compute function
+      setLiveKPIs(computeKpisFromIncidents(freshIncidents as any));
+      // keep KPIs visible briefly so user sees new counts
+      setTimeout(() => setLiveKPIs(null), 1200);
+      showMessage("Jira sync completed and dashboard refreshed.");
+    } else {
+      // fallback: if refresh endpoint failed, still try the server-side /sync/board (read-only)
+      const res = await api.post("/sync/board", { max_results: 5000 }).then((r) => r.data).catch(() => null);
+      if (res?.kpis) {
+        setLiveKPIs({
+          total: Number(res.kpis.total ?? res.n_issues ?? 0),
+          open: Number(res.kpis.open ?? 0),
+          closed: Number(res.kpis.closed ?? 0),
+          highSeverity: Number(res.kpis.highSeverity ?? 0),
+        });
+      }
+      // refresh incidents query in background
+      queryClient.invalidateQueries({ queryKey: ["incidents", "all"] });
+      showMessage("Sync started or completed (partial). If changes don't appear try Refresh again in a few seconds.");
+
+      // ensure label breakdown is refreshed after a successful sync
+      queryClient.invalidateQueries({ queryKey: ["labelBreakdown"] });
+
     }
-
-    // immediate user feedback
-    showMessage("Board refresh completed and KPIs updated.");
-
-    // Invalidate queries (mark stale) AND set fresh incidents cache so UI updates immediately
-    // 1) mark stale so background refetch can still happen
-    queryClient.invalidateQueries({ queryKey: ["incidents", "all"] });
-    queryClient.invalidateQueries({ queryKey: ["sprints"] });
-
-    // 2) fetch fresh incidents and write into cache immediately (non-blocking to user)
-    // note: this ensures "Total Defects" and table align to Jira immediately
-    api.get("/incidents", { params: { max_results: 5000 } })
-      .then(r => r.data)
-      .then((freshIncidents: any[]) => {
-        // set the query data (immediate)
-        queryClient.setQueryData(["incidents", "all"], freshIncidents);
-        // optionally clear liveKPIs after heavy refresh completes — keep little delay so user sees immediate numbers
-        setTimeout(() => setLiveKPIs(null), 800);
-      })
-      .catch(err => {
-        console.error("Background incidents fetch failed:", err);
-        // leave liveKPIs so user sees counts returned by sync_board
-        setLiveKPIs(prev => prev);
-      });
-
   } catch (err: any) {
     console.error("Refresh board failed:", err);
     showMessage("Board refresh failed: " + (err?.message || String(err)));
@@ -177,6 +219,7 @@ export default function Dashboard() {
     setSyncingBoard(false);
   }
 };
+
 
 
   const { data, isLoading, isError, error, refetch } = useQuery<Incident[]>({
@@ -324,13 +367,74 @@ export default function Dashboard() {
     };
   }, [data, yearFilter, monthFilter, sprintFilter]);
 
+  // Priority mapping + grouping (add right after your big useMemo that yields `rows`)
+const PRIORITY_MAP: Record<string, string> = {
+  high: "P1",
+  highest: "P1",
+  medium: "P2",
+  low: "P3",
+  lowest: "P4",
+};
+
+const priorityGroups = useMemo(() => {
+  type Group = { label: string; count: number; items: Incident[] };
+  const groups: Record<string, Group> = {};
+  // Ensure canonical buckets exist
+  ["P1", "P2", "P3", "P4", "Other"].forEach((k) => {
+    groups[k] = { label: k, count: 0, items: [] };
+  });
+
+  for (const r of (rows || [])) {
+    const raw = (r.priority || "").toString().trim();
+    const mapped = (PRIORITY_MAP[raw.toLowerCase()] || "Other");
+    groups[mapped].count++;
+    groups[mapped].items.push(r);
+  }
+
+  // set a human label for each P bucket from a sample item if available
+  ["P1", "P2", "P3", "P4"].forEach((k) => {
+    if (groups[k].items.length > 0) groups[k].label = groups[k].items[0].priority || groups[k].label;
+  });
+
+  return groups;
+}, [rows]);
+
+
   // Use live KPIs if available, otherwise use computed KPIs
   const displayKPIs = liveKPIs || (kpis as any);
 
   const sprintChartWidth = Math.max(900, (viewBy === "sprint" ? sprintSeries.length : monthSeries.length) * 120);
   const quarterChartWidth = Math.max(800, quarterSeveritySeries.length * 160);
 
-  if (isLoading) return <p>Loading dashboard...</p>;
+  // show a full-screen loading overlay while data loads (prettier than a plain text)
+if (isLoading) {
+  return (
+    <div style={{ minHeight: "60vh", position: "relative" }}>
+      <div className="modal-overlay" style={{ background: "rgba(0,0,0,0.05)", zIndex: 100 }}>
+        <div
+          className="modal-panel"
+          style={{
+            width: "min(520px, 92%)",
+            padding: 20,
+            textAlign: "center",
+            boxShadow: "none",
+            background: "transparent",
+            transform: "none",
+            animation: "none",
+          }}
+        >
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 16, marginTop: 20 }}>
+            <div className="loading-bar" />
+            <img className="rotating-img" src="/bug.png" alt="Loading..." />
+            <div style={{ fontSize: 13, color: "#6B778C" }}>Fetching latest issues and KPIs...</div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  );
+}
+
   if (isError) {
     console.error("Error fetching incidents:", error);
     return <p style={{ color: "crimson" }}>⚠ Error fetching incidents</p>;
@@ -417,7 +521,52 @@ export default function Dashboard() {
         </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: "16px", alignItems: "stretch", marginTop: "2rem" }}>
+      {/* place Priority Breakdown first, Quarter vs Severity second to reduce congestion */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px", alignItems: "stretch", marginTop: "2rem" }}>
+        {/* Priority Breakdown (left) */}
+        <div style={{ border: "1px solid #ddd", borderRadius: 6, padding: 8 }}>
+          <h3 style={{ margin: "0 0 8px" }}>Priority Breakdown</h3>
+
+          <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+            {/* Pie chart (left) */}
+            <div style={{ flex: 1, minWidth: 200, height: 320 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie data={priorityBreakdown} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={110} label>
+                    {priorityBreakdown.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
+                  </Pie>
+                  <Tooltip />
+                  <Legend />
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+
+            {/* Quick priority counts + show list (right) */}
+            <div style={{ width: 260 }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {["P1", "P2", "P3", "P4", "Other"].map((pkey) => {
+                  const g = (priorityGroups && (priorityGroups as any)[pkey]) || { count: 0, label: "" };
+                  return (
+                    <div key={pkey} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 4px", borderRadius: 6 }}>
+                      <div>
+                        <div style={{ fontSize: 13, color: "#666" }}>{pkey} <small style={{ color: "#888" }}>{g.label}</small></div>
+                        <div style={{ fontWeight: 700, fontSize: 18 }}>{g.count}</div>
+                      </div>
+                      <div>
+                        <button className="btn-recs" onClick={() => openPriorityModal(pkey)} aria-label={`Show list for ${pkey}`}>
+                          Show list
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+            </div>
+          </div>
+        </div>
+
+        {/* Quarter vs Severity (right) */}
         <div style={{ border: "1px solid #ddd", borderRadius: 6, padding: 8, overflowX: "auto" }}>
           <h3 style={{ margin: "0 0 8px" }}>Quarter vs Severity</h3>
           <div style={{ width: quarterChartWidth, height: 320 }}>
@@ -433,20 +582,8 @@ export default function Dashboard() {
             </ResponsiveContainer>
           </div>
         </div>
-
-        <div style={{ border: "1px solid #ddd", borderRadius: 6, padding: 8 }}>
-          <h3 style={{ margin: "0 0 8px" }}>Priority Breakdown</h3>
-          <ResponsiveContainer width="100%" height={320}>
-            <PieChart>
-              <Pie data={priorityBreakdown} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={110} label>
-                {priorityBreakdown.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
-              </Pie>
-              <Tooltip />
-              <Legend />
-            </PieChart>
-          </ResponsiveContainer>
-        </div>
       </div>
+
 
       <h3 style={{ marginTop: "2rem" }}>All Incidents</h3>
       <div style={{ maxHeight: "50vh", overflow: "auto", border: "1px solid #ccc" }}>
@@ -488,31 +625,121 @@ export default function Dashboard() {
         </table>
       </div>
       {/* Confirm modal */}
-{confirmOpen && (
-  <div className="modal-overlay" role="dialog" aria-modal="true" onClick={(e) => { if (e.target === e.currentTarget) _closeConfirm(false); }}>
-    <div className="modal-panel" role="document" style={{ maxWidth: 560 }}>
-      <h3 style={{ marginTop: 0 }}>Confirm</h3>
-      <div style={{ marginTop: 8, color: "var(--muted)" }}>{confirmMessage}</div>
-      <div style={{ display: "flex", gap: 12, justifyContent: "flex-end", marginTop: 18 }}>
-        <button className="btn btn-ghost btn-pill" onClick={() => _closeConfirm(false)} type="button">Cancel</button>
-        <button className="btn btn-primary btn-pill" onClick={() => _closeConfirm(true)} type="button">OK</button>
+  {confirmOpen && (
+    <div className="modal-overlay" role="dialog" aria-modal="true" onClick={(e) => { if (e.target === e.currentTarget) _closeConfirm(false); }}>
+      <div className="modal-panel" role="document" style={{ maxWidth: 560 }}>
+        <h3 style={{ marginTop: 0 }}>Confirm</h3>
+        <div style={{ marginTop: 8, color: "var(--muted)" }}>{confirmMessage}</div>
+        <div style={{ display: "flex", gap: 12, justifyContent: "flex-end", marginTop: 18 }}>
+          <button className="btn btn-ghost btn-pill" onClick={() => _closeConfirm(false)} type="button">Cancel</button>
+          <button className="btn btn-primary btn-pill" onClick={() => _closeConfirm(true)} type="button">OK</button>
+        </div>
+      </div>
+    </div>
+  )}
+
+  {/* Message modal */}
+  {msgOpen && (
+    <div className="modal-overlay" role="dialog" aria-modal="true" onClick={(e) => { if (e.target === e.currentTarget) closeMessage(); }}>
+      <div className="modal-panel" role="document" style={{ maxWidth: 560 }}>
+        <h3 style={{ marginTop: 0 }}>Message</h3>
+        <div style={{ marginTop: 8, color: "var(--muted)" }}>{msgText}</div>
+        <div style={{ display: "flex", gap: 12, justifyContent: "flex-end", marginTop: 18 }}>
+          <button className="btn btn-primary btn-pill" onClick={() => closeMessage()} type="button">OK</button>
+        </div>
+      </div>
+    </div>
+  )}
+
+
+
+  {/* Priority modal (list view) */}
+{priorityModalOpen && priorityModalKey && (
+  <div
+    className="modal-overlay"
+    role="dialog"
+    aria-modal="true"
+    onClick={(e) => { if (e.target === e.currentTarget) closePriorityModal(); }}
+  >
+    <div className="modal-panel" style={{ width: "min(980px, 96%)", maxHeight: "80vh", overflow: "auto" }}>
+      <button className="modal-close" onClick={closePriorityModal} aria-label="Close">✕</button>
+
+      <h3 style={{ marginTop: 0 }}>
+        {priorityModalKey} — {(priorityGroups as any)[priorityModalKey]?.label || ""} &nbsp;
+        <small style={{ color: "#666", fontWeight: 500 }}>({(priorityGroups as any)[priorityModalKey]?.count || 0})</small>
+      </h3>
+
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
+        <input
+          placeholder="Search issue key or summary..."
+          value={priorityFilterText}
+          onChange={(e) => { setPriorityFilterText(e.target.value); setPriorityPage(0); }}
+          style={{ flex: 1, padding: 8, borderRadius: 6, border: "1px solid #ddd" }}
+        />
+        <div>
+          <button className="btn btn-ghost" onClick={() => { setPriorityFilterText(""); }}>Clear</button>
+        </div>
+      </div>
+
+      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <thead style={{ background: "#fafafa", position: "sticky", top: 0, zIndex: 5 }}>
+          <tr>
+            <th style={{ padding: 8 }}>Issue</th>
+            <th style={{ padding: 8 }}>Summary</th>
+            <th style={{ padding: 8 }}>Priority</th>
+            <th style={{ padding: 8 }}>Severity</th>
+            <th style={{ padding: 8 }}>Status</th>
+            <th style={{ padding: 8 }}>Sprint</th>
+            <th style={{ padding: 8 }}>Created</th>
+            <th style={{ padding: 8 }}>Open</th>
+          </tr>
+        </thead>
+        <tbody>
+          {(() => {
+            const groupItems: Incident[] = ((priorityGroups as any)[priorityModalKey]?.items || []) as Incident[];
+            const filtered = groupItems.filter(it => {
+              if (!priorityFilterText) return true;
+              const q = priorityFilterText.toLowerCase();
+              return String(it.incident_no || "").toLowerCase().includes(q) ||
+                     String(it.brief_detail || it.description || "").toLowerCase().includes(q);
+            });
+            const start = priorityPage * PRIORITY_PAGE_SIZE;
+            const pageItems = filtered.slice(start, start + PRIORITY_PAGE_SIZE);
+            return pageItems.map((it, idx) => (
+              <tr key={it.incident_no || idx} style={{ borderBottom: "1px solid #f3f3f3" }}>
+                <td style={{ padding: 8 }}>{it.incident_no}</td>
+                <td style={{ padding: 8, maxWidth: 380, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.brief_detail || it.description}</td>
+                <td style={{ padding: 8 }}>{it.priority}</td>
+                <td style={{ padding: 8 }}>{it.severity}</td>
+                <td style={{ padding: 8 }}>{it.status}</td>
+                <td style={{ padding: 8 }}>{it.Sprint || "-"}</td>
+                <td style={{ padding: 8 }}>{it.creation_time}</td>
+                <td style={{ padding: 8 }}>
+                  {/* Replace `https://your-jira-host` with your Jira host OR use item.url if you persist it */}
+                  <a className="btn-jira" href={`https://rahulprasad4262.atlassian.net/browse/${it.incident_no}`} target="_blank" rel="noreferrer" title="Open in Jira">➤</a>
+                </td>
+              </tr>
+            ));
+          })()}
+        </tbody>
+      </table>
+
+      {/* Pagination */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12 }}>
+        <div>
+          <small style={{ color: "#666" }}>
+            Showing {(priorityPage * PRIORITY_PAGE_SIZE) + 1} - {Math.min((priorityPage + 1) * PRIORITY_PAGE_SIZE, ((priorityGroups as any)[priorityModalKey]?.items || []).length)} of {(priorityGroups as any)[priorityModalKey]?.items?.length || 0}
+          </small>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="btn btn-ghost" onClick={() => setPriorityPage(p => Math.max(0, p - 1))} disabled={priorityPage === 0}>Prev</button>
+          <button className="btn btn-ghost" onClick={() => setPriorityPage(p => p + 1)} disabled={(priorityPage + 1) * PRIORITY_PAGE_SIZE >= ((priorityGroups as any)[priorityModalKey]?.items || []).length}>Next</button>
+        </div>
       </div>
     </div>
   </div>
 )}
 
-{/* Message modal */}
-{msgOpen && (
-  <div className="modal-overlay" role="dialog" aria-modal="true" onClick={(e) => { if (e.target === e.currentTarget) closeMessage(); }}>
-    <div className="modal-panel" role="document" style={{ maxWidth: 560 }}>
-      <h3 style={{ marginTop: 0 }}>Message</h3>
-      <div style={{ marginTop: 8, color: "var(--muted)" }}>{msgText}</div>
-      <div style={{ display: "flex", gap: 12, justifyContent: "flex-end", marginTop: 18 }}>
-        <button className="btn btn-primary btn-pill" onClick={() => closeMessage()} type="button">OK</button>
-      </div>
-    </div>
-  </div>
-)}
 
     </div>
   );

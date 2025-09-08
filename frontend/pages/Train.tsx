@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
-import { api } from "../api";
+import { api } from "../src/api";
 
 export default function Train() {
   const [csvPath, setCsvPath] = useState("data/QA_Defects_Issues.csv");

@@ -11,7 +11,8 @@ import {
   PredictResponse,
   getSprintsLive,
   syncJira,
-} from "../api";
+  api,
+} from "../src/api";
 
 type IssueRow = {
   issue_key: string;
@@ -51,16 +52,26 @@ export default function Predict() {
 
   // small helper — shallow equality for issues arrays so we only set local state when data actually changed.
   const shallowIssuesEqual = (a: IssueRow[] | undefined, b: IssueRow[] | undefined) => {
-    if (a === b) return true;
-    if (!Array.isArray(a) || !Array.isArray(b)) return false;
-    if (a.length !== b.length) return false;
-    // quick heuristic: compare first & last issue_key — cheap and prevents ref-only churn.
-    const a0 = a[0]?.issue_key ?? "";
-    const b0 = b[0]?.issue_key ?? "";
-    const aL = a[a.length - 1]?.issue_key ?? "";
-    const bL = b[b.length - 1]?.issue_key ?? "";
-    return a0 === b0 && aL === bL;
-  };
+  if (a === b) return true;
+  if (!Array.isArray(a) || !Array.isArray(b)) return false;
+  if (a.length !== b.length) return false;
+
+  // Compare each row's key + the few fields that matter visually: severity, prediction, confidence_score.
+  // Keep it cheap: straight loop, no JSON.stringify (avoid allocation churn).
+  for (let i = 0; i < a.length; i++) {
+    const ai = a[i] || ({} as IssueRow);
+    const bi = b[i] || ({} as IssueRow);
+    if ((ai.issue_key ?? "") !== (bi.issue_key ?? "")) return false;
+    if ((ai.severity ?? "") !== (bi.severity ?? "")) return false;
+    if ((ai.prediction ?? "") !== (bi.prediction ?? "")) return false;
+    // normalize numeric/percent differences
+    const ac = ai.confidence_score == null ? "" : String(ai.confidence_score);
+    const bc = bi.confidence_score == null ? "" : String(bi.confidence_score);
+    if (ac !== bc) return false;
+  }
+  return true;
+};
+
 
   // useQuery for sprints: avoid aggressive refetching to reduce UI churn during sync
   const {
@@ -197,51 +208,167 @@ export default function Predict() {
 
       }
 
-      const maxAttempts = 8;
+
+      // for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      //   await new Promise((res) => setTimeout(res, delayMs));
+      //   let fresh: string[] = [];
+      //   try {
+      //     fresh = await getSprintsLive(true);
+      //   } catch (err) {
+      //     console.warn("getSprintsLive failed during polling:", err);
+      //     fresh = [];
+      //   }
+
+      //   // quick check: detect meaningful change (length + first/last)
+      //   const prevLen = Array.isArray(prevSprints) ? prevSprints.length : 0;
+      //   const freshLen = Array.isArray(fresh) ? fresh.length : 0;
+      //   const arraysDiffer =
+      //     !(
+      //       Array.isArray(prevSprints) &&
+      //       prevLen === freshLen &&
+      //       prevSprints[0] === fresh[0] &&
+      //       prevSprints[prevLen - 1] === fresh[freshLen - 1]
+      //     );
+      //   const pickedUpNew = (freshLen > 0 && arraysDiffer) || (selectedSprint && fresh.includes(selectedSprint));
+
+      //   // if (pickedUpNew) {
+      //   //   // Only write to cache if content actually changed to avoid churn
+      //   //   queryClient.setQueryData(["sprints"], fresh);
+      //   //   // small delay to allow backend corpus write to finish then refetch issues
+      //   //   if (selectedSprint) await new Promise((res) => setTimeout(res, 800));
+      //   //   try {
+      //   //     await refetchIssues();
+      //   //   } catch (e) {
+      //   //     console.warn("refetchIssues failed after sync:", e);
+      //   //   }
+      //   //   success = true;
+      //   //   break;
+      //   // }
+      //   if (pickedUpNew) {
+      //       // Update sprints cache
+      //       queryClient.setQueryData(["sprints"], fresh);
+
+      //       // Force a fresh issues fetch directly from server (bypass caches)
+      //       try {
+      //         // prefer strict params to hit same server path as your useQuery
+      //         const params: any = { max_results: 5000 };
+      //         if (selectedSprint) params.sprint = selectedSprint;
+      //         // force network freshness by sending Cache-Control header
+      //         const resp = await api.get("/issues", {
+      //           params,
+      //           headers: { "Cache-Control": "no-cache" },
+      //         });
+      //         const freshIssues = resp?.data;
+
+      //         if (Array.isArray(freshIssues)) {
+      //           // eagerly write fresh issues into react-query cache so UI updates immediately
+      //           queryClient.setQueryData(["issues", selectedSprint], freshIssues);
+      //           // also ensure the react-query stored query is marked fresh
+      //           queryClient.invalidateQueries({ queryKey: ["issues", selectedSprint] });
+      //           // small delay to ensure backend completed any final writes
+      //           await new Promise((r) => setTimeout(r, 300));
+      //         } else {
+      //           // fallback: call refetchIssues if direct fetch didn't return array
+      //           try { await refetchIssues(); } catch (e) { console.warn("refetchIssues fallback failed", e); }
+      //         }
+      //       } catch (e) {
+      //         console.warn("Forced issues fetch after sync failed:", e);
+      //         // fallback to refetch
+      //         try { await refetchIssues(); } catch (err) { console.warn("refetchIssues fallback failed", err); }
+      //       }
+
+      //       success = true;
+      //       break;
+      //     }
+
+
+      //   // if we were on last attempt, still attempt a final update if fresh non-empty and prev empty
+      //   if (attempt === maxAttempts - 1 && freshLen > 0 && (!Array.isArray(prevSprints) || prevLen === 0)) {
+      //     queryClient.setQueryData(["sprints"], fresh);
+      //   }
+      // }
+            // robust polling: compare issue-level content instead of relying on sprints list alone
+      const prevMap = new Map<string, { severity?: string; prediction?: string }>();
+      for (const it of (issues || [])) {
+        if (it && it.issue_key) prevMap.set(it.issue_key, { severity: it.severity, prediction: it.prediction });
+      }
+
+      const maxAttempts = 10;
       const delayMs = 2000;
       let success = false;
 
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        // wait before polling (allow backend to finish work)
         await new Promise((res) => setTimeout(res, delayMs));
-        let fresh: string[] = [];
+
+        // force network fetch of issues (bypass caches)
         try {
-          fresh = await getSprintsLive(true);
-        } catch (err) {
-          console.warn("getSprintsLive failed during polling:", err);
-          fresh = [];
-        }
+          const params: any = {};
+          if (selectedSprint) params.sprint = selectedSprint;
+          // backend GET /issues respects openOnly param; default behavior is fine, but include explicitly
+          params.openOnly = true;
 
-        // quick check: detect meaningful change (length + first/last)
-        const prevLen = Array.isArray(prevSprints) ? prevSprints.length : 0;
-        const freshLen = Array.isArray(fresh) ? fresh.length : 0;
-        const arraysDiffer =
-          !(
-            Array.isArray(prevSprints) &&
-            prevLen === freshLen &&
-            prevSprints[0] === fresh[0] &&
-            prevSprints[prevLen - 1] === fresh[freshLen - 1]
-          );
-        const pickedUpNew = (freshLen > 0 && arraysDiffer) || (selectedSprint && fresh.includes(selectedSprint));
+          const resp = await api.get("/issues", {
+            params,
+            headers: { "Cache-Control": "no-cache", Pragma: "no-cache" },
+          });
+          const freshIssues: IssueRow[] = Array.isArray(resp?.data) ? resp.data : [];
 
-        if (pickedUpNew) {
-          // Only write to cache if content actually changed to avoid churn
-          queryClient.setQueryData(["sprints"], fresh);
-          // small delay to allow backend corpus write to finish then refetch issues
-          if (selectedSprint) await new Promise((res) => setTimeout(res, 800));
-          try {
-            await refetchIssues();
-          } catch (e) {
-            console.warn("refetchIssues failed after sync:", e);
+          // quick heuristic: if number of issues changed, accept as update
+          if (freshIssues.length !== (issues?.length ?? 0)) {
+            queryClient.setQueryData(["issues", selectedSprint], freshIssues);
+            success = true;
+            break;
           }
-          success = true;
-          break;
+
+          // compare per-issue important fields (severity, prediction). If any difference, we have fresh data.
+          let foundDiff = false;
+          for (const f of freshIssues) {
+            if (!f || !f.issue_key) continue;
+            const prev = prevMap.get(f.issue_key);
+            // if issue didn't exist before or key not in prevMap => new entry
+            if (!prev) {
+              foundDiff = true;
+              break;
+            }
+            const prevSev = (prev.severity || "").trim();
+            const prevPred = (prev.prediction || "").trim();
+            const curSev = (f.severity || "").trim();
+            const curPred = (f.prediction || "").trim();
+            if (prevSev !== curSev || prevPred !== curPred) {
+              foundDiff = true;
+              break;
+            }
+          }
+
+          if (foundDiff) {
+            // write fresh issues into react-query cache so UI updates immediately
+            queryClient.setQueryData(["issues", selectedSprint], freshIssues);
+            // mark stale/invalidate to keep react-query happy
+            queryClient.invalidateQueries({ queryKey: ["issues", selectedSprint] });
+            success = true;
+            break;
+          }
+
+          // otherwise continue polling
+        } catch (e) {
+          console.warn("Polling /issues after sync failed (attempt):", attempt, e);
+          // continue polling — backend might still be writing
         }
 
-        // if we were on last attempt, still attempt a final update if fresh non-empty and prev empty
-        if (attempt === maxAttempts - 1 && freshLen > 0 && (!Array.isArray(prevSprints) || prevLen === 0)) {
-          queryClient.setQueryData(["sprints"], fresh);
+        // final attempt fallback: if this is last iteration try to force-set sprints if they exist
+        if (attempt === maxAttempts - 1) {
+          try {
+            const finalSprints = await getSprintsLive(true);
+            if (Array.isArray(finalSprints) && finalSprints.length > 0) {
+              queryClient.setQueryData(["sprints"], finalSprints);
+            }
+          } catch (ee) {
+            // ignore
+          }
         }
       }
+
 
       if (success) {
         showMessage("Jira sync completed and sprints refreshed.");

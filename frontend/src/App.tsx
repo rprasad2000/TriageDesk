@@ -1,9 +1,9 @@
 // frontend/src/App.tsx
 import { Routes, Route, NavLink } from "react-router-dom";
-import Dashboard from "./pages/Dashboard";
-import Train from "./pages/Train";
-import Predict from "./pages/Predict";
-import Retrain from "./pages/Retrain";
+import Dashboard from "../pages/Dashboard";
+import Train from "../pages/Train";
+import Predict from "../pages/Predict";
+import Retrain from "../pages/Retrain";
 
 export default function App() {
   return (

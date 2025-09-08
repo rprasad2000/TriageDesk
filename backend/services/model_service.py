@@ -1,6 +1,6 @@
 # backend/services/model_service.py
 import os, re, yaml, joblib, numpy as np, pandas as pd
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 from pathlib import Path
 from scipy import sparse
@@ -11,6 +11,8 @@ from sklearn.metrics.pairwise import linear_kernel
 from sklearn.model_selection import GroupShuffleSplit
 from sklearn.metrics import accuracy_score, classification_report
 from sklearn.metrics.pairwise import linear_kernel
+from collections import Counter
+
 
 # ---------------- Paths & artifacts ----------------
 MODELS_DIR = Path("backend/models")
@@ -24,6 +26,24 @@ ENC_PATH     = MODELS_DIR / "label_encoder.joblib"
 MATRIX_PATH  = MODELS_DIR / "tfidf_matrix.npz"
 CORPUS_PATH  = MODELS_DIR / "corpus.parquet"
 FEEDBACK_PATH = DATA_DIR / "feedback.parquet"
+
+ # ---------------- simple in-memory artifact cache ----------------
+_artifact_cache = {
+    "vect_mtime": None,
+    "matrix_mtime": None,
+    "corpus_mtime": None,
+    "vectorizer": None,
+    "tfidf_matrix": None,
+    "corpus": None,
+    "clf": None,
+    "enc": None,
+    "warned_mismatch": False,
+}
+def _get_mtime(path):
+    try:
+        return path.stat().st_mtime
+    except Exception:
+        return None
 
 # ---------------- Label aliases (config-driven, optional) ----------------
 def _load_aliases() -> List[Dict[str, str]]:
@@ -334,8 +354,42 @@ def build_df_from_jira_issues(issues: List[Dict[str, Any]], host: str) -> pd.Dat
 
 # ---------------- Predict + Recommend ----------------
 def _load_artifacts(require_classifier: bool = True):
+    """
+    Load vectorizer / tfidf_matrix / corpus / classifier artifacts with a small
+    in-memory cache so repeated calls (e.g. while enriching many incidents) don't
+    reload large files from disk every time.
+
+    If artifacts are missing we raise FileNotFoundError as before.
+    If tfidf_matrix rows != corpus rows we truncate to the smaller size to avoid indexing errors.
+    We only emit the mismatch warning once per process to avoid spamming logs.
+    """
+    # ensure required files exist first
     if not VECT_PATH.exists() or not MATRIX_PATH.exists() or not CORPUS_PATH.exists():
         raise FileNotFoundError("Model artifacts not found. Train first.")
+
+    # compute mtimes for change detection
+    vect_mtime = _get_mtime(VECT_PATH)
+    matrix_mtime = _get_mtime(MATRIX_PATH)
+    corpus_mtime = _get_mtime(CORPUS_PATH)
+
+    # If cache is valid and file mtimes haven't changed, return cached artifacts
+    if (_artifact_cache["vectorizer"] is not None
+        and _artifact_cache["tfidf_matrix"] is not None
+        and _artifact_cache["corpus"] is not None
+        and _artifact_cache.get("vect_mtime") == vect_mtime
+        and _artifact_cache.get("matrix_mtime") == matrix_mtime
+        and _artifact_cache.get("corpus_mtime") == corpus_mtime):
+        clf = _artifact_cache.get("clf")
+        enc = _artifact_cache.get("enc")
+        # If classifier is needed but not cached, we'll load below
+        if not require_classifier or (require_classifier and clf is not None and enc is not None):
+            return (_artifact_cache["vectorizer"],
+                    _artifact_cache["tfidf_matrix"],
+                    _artifact_cache["corpus"],
+                    clf,
+                    enc)
+
+    # Load fresh artifacts from disk
     vectorizer = joblib.load(VECT_PATH)
     tfidf_matrix = _load_sparse(MATRIX_PATH)
     corpus = pd.read_parquet(CORPUS_PATH)
@@ -347,13 +401,13 @@ def _load_artifacts(require_classifier: bool = True):
         if n_mat != n_corpus:
             # truncate both to the smaller dimension to avoid indexing errors
             m = min(n_mat, n_corpus)
-            # slice sparse matrix and dataframe
             tfidf_matrix = tfidf_matrix[:m]
             corpus = corpus.iloc[:m].reset_index(drop=True)
-            # log a clear warning so future debugging is easy
-            print(f"[WARN] artifact row-count mismatch: tfidf_matrix={n_mat}, corpus={n_corpus}. Truncated to {m}.")
+            # only warn once per process so logs are not spammed
+            if not _artifact_cache.get("warned_mismatch", False):
+                print(f"[WARN] artifact row-count mismatch: tfidf_matrix={n_mat}, corpus={n_corpus}. Truncated to {m}.")
+                _artifact_cache["warned_mismatch"] = True
     except Exception as e:
-        # be defensive but continue if something odd happens
         print(f"[WARN] failed to validate artifact shapes: {e}")
 
     clf = enc = None
@@ -362,6 +416,19 @@ def _load_artifacts(require_classifier: bool = True):
             raise FileNotFoundError("Classifier artifacts not found. Train with labeled data.")
         clf = joblib.load(MODEL_PATH)
         enc = joblib.load(ENC_PATH)
+
+    # update cache
+    _artifact_cache.update({
+        "vect_mtime": vect_mtime,
+        "matrix_mtime": matrix_mtime,
+        "corpus_mtime": corpus_mtime,
+        "vectorizer": vectorizer,
+        "tfidf_matrix": tfidf_matrix,
+        "corpus": corpus,
+        "clf": clf,
+        "enc": enc,
+    })
+
     return vectorizer, tfidf_matrix, corpus, clf, enc
 
 
@@ -448,3 +515,173 @@ def classify_and_recommend_batch(texts: List[str], top_k: int = 3) -> List[Dict[
             "recommendations": recs
         })
     return results
+
+def _is_closed_status(s: str) -> bool:
+    # canonical closed-like statuses (lowercase)
+    try:
+        st = (s or "").strip().lower()
+        return st in {"done", "closed", "resolved", "cancelled", "canceled"}
+    except Exception:
+        return False
+
+def _extract_labels_from_value(val: Any) -> list:
+    """
+    Accept a label value that may be:
+      - single string (e.g. "API")
+      - comma-separated string ("API, Backend")
+      - list-like string representation or Python list/object; best-effort
+    Returns a list of cleaned, aliased label names (non-empty).
+    """
+    if val is None:
+        return []
+    if isinstance(val, list):
+        raw = [str(x) for x in val if x]
+        parts = raw
+    else:
+        s = str(val).strip()
+        if not s:
+            return []
+        # try a couple of separators (comma, semicolon, pipe)
+        if "," in s or ";" in s or "|" in s:
+            parts = [p.strip() for p in re.split(r"[;,|]", s) if p.strip()]
+        else:
+            # if it looks like a Python list: "['A','B']" or '["A","B"]'
+            if s.startswith("[") and s.endswith("]"):
+                # remove brackets and split on commas conservatively
+                inner = s[1:-1]
+                parts = [p.strip().strip("'\"") for p in inner.split(",") if p.strip()]
+            else:
+                parts = [s]
+    # apply alias mapping for canonical names
+    out = []
+    for p in parts:
+        mapped = _alias_map(p)
+        if mapped:
+            out.append(mapped)
+    return out
+
+def compute_label_breakdown_from_df(df: pd.DataFrame, top_n: int = 20, status_filter: str = "both") -> Dict[str, Any]:
+    """
+    Compute label breakdown from a DataFrame (corpus).
+    - df: expected to contain at least 'issue_key' and 'status' and 'label' (or 'labels') columns.
+    - top_n: how many labels to return (others aggregated as 'other_count').
+    - status_filter: 'open'|'closed'|'both' -> used to count only open/closed issues if desired.
+    Returns JSON-ready dict:
+      { "labels": [ {name, open, closed, total}, ... ], "other_count": int, "total_labels": int }
+    """
+    if df is None or df.shape[0] == 0:
+        return {"labels": [], "other_count": 0, "total_labels": 0}
+
+    # pick label column (support 'label' and 'labels')
+    label_col = None
+    if "label" in df.columns:
+        label_col = "label"
+    elif "labels" in df.columns:
+        label_col = "labels"
+    else:
+        # nothing to aggregate
+        return {"labels": [], "other_count": 0, "total_labels": 0}
+
+    # counters per label
+    open_counter = Counter()
+    closed_counter = Counter()
+    total_counter = Counter()
+    unk_counter = Counter()
+
+    for _, row in df.iterrows():
+        raw_labels = row.get(label_col, "")
+        labels = _extract_labels_from_value(raw_labels)
+        if not labels:
+            # count as unlabeled/other (optional)
+            unk_counter["__unlabeled__"] += 1
+            continue
+
+        st = row.get("status", "")
+        is_closed = _is_closed_status(st)
+        for lab in labels:
+            if not lab:
+                continue
+            if is_closed:
+                closed_counter[lab] += 1
+            else:
+                open_counter[lab] += 1
+            total_counter[lab] += 1
+
+    # Build items sorted by total desc
+    items = []
+    for lab, tot in total_counter.items():
+        items.append({"name": lab, "open": int(open_counter.get(lab, 0)), "closed": int(closed_counter.get(lab, 0)), "total": int(tot)})
+
+    items_sorted = sorted(items, key=lambda x: x["total"], reverse=True)
+    top_items = items_sorted[:top_n]
+    other_items = items_sorted[top_n:]
+    other_count = sum(x["total"] for x in other_items)
+
+    return {
+        "labels": top_items,
+        "other_count": int(other_count),
+        "total_labels": int(len(items_sorted)),
+    }
+
+def compute_label_breakdown(top_n: int = 20, status_filter: str = "both") -> Dict[str, Any]:
+    """
+    Convenience wrapper: read CORPUS_PATH and compute breakdown.
+    """
+    if not CORPUS_PATH.exists():
+        return {"labels": [], "other_count": 0, "total_labels": 0}
+    df = pd.read_parquet(CORPUS_PATH)
+    # normalize column name if 'Sprint' instead of 'sprint', keep existing behavior
+    if "Sprint" in df.columns and "sprint" not in df.columns:
+        df = df.rename(columns={"Sprint": "sprint"})
+    return compute_label_breakdown_from_df(df, top_n=top_n, status_filter=status_filter)
+
+
+def get_issues_for_label(label_name: str, status_filter: str = "both", max_results: int = 2000) -> list:
+    """
+    Return list of issues (dicts) for a label from the persisted corpus.
+    - label_name: exact label name after alias mapping (case-sensitive)
+    - status_filter: 'open'|'closed'|'both'
+    - max_results: max rows returned
+    """
+    if not CORPUS_PATH.exists():
+        return []
+    df = pd.read_parquet(CORPUS_PATH)
+
+    # normalize Sprint header if needed
+    if "Sprint" in df.columns and "sprint" not in df.columns:
+        df = df.rename(columns={"Sprint": "sprint"})
+
+    # prepare mask: find rows where label_name is one of the labels extracted
+    def row_has_label(row_label_val) -> bool:
+        labs = _extract_labels_from_value(row_label_val)
+        return label_name in labs
+
+    mask = df[label_col] if (label_col := ("label" if "label" in df.columns else ("labels" if "labels" in df.columns else None))) else None
+    if mask is None:
+        return []
+
+    # filter by label
+    df_filtered = df[df[label_col].apply(row_has_label)]
+
+    # filter by status
+    if status_filter in ("open", "closed"):
+        if status_filter == "open":
+            df_filtered = df_filtered[~df_filtered["status"].astype(str).str.lower().isin(["done", "closed", "resolved", "cancelled"])]
+        else:
+            df_filtered = df_filtered[df_filtered["status"].astype(str).str.lower().isin(["done", "closed", "resolved", "cancelled"])]
+
+    # limit & pick useful fields
+    out = []
+    for _, r in df_filtered.head(max_results).iterrows():
+        out.append({
+            "issue_key": r.get("issue_key"),
+            "summary": r.get("summary", ""),
+            "status": r.get("status", ""),
+            "priority": r.get("priority", ""),
+            "severity": r.get("severity", ""),
+            "created": r.get("created", ""),
+            "url": r.get("url", ""),
+            "ticket_description": r.get("ticket_description", ""),
+            "sprint": r.get("sprint", "")
+        })
+    return out

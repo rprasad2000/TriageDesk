@@ -1,7 +1,7 @@
 // frontend/src/pages/Retrain.tsx
 import React from "react";
 import { useMutation } from "@tanstack/react-query";
-import { api } from "../api";
+import { api } from "../src/api";
 
 /**
  * Helper: Parse sklearn-style classification report text into structured rows + summary.
