@@ -1,7 +1,7 @@
 // src/pages/Dashboard.tsx
 import React, { useMemo, useState, useEffect, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, syncBoard, getSprintsLive  } from "../src/api";
+import { api, syncBoard, getSprintsLive, getLabelBreakdown   } from "../src/api";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, Brush, BarChart, Bar, PieChart, Pie, Cell,
@@ -9,8 +9,9 @@ import {
 import dayjs from "dayjs";
 import quarterOfYear from "dayjs/plugin/quarterOfYear";
 dayjs.extend(quarterOfYear);
-
-
+import LabelBreakdownChart from "../src/components/LabelBreakdownChart";
+import LabelIssuesModal from "../src/components/LabelIssuesModal";
+const JIRA_HOST = import.meta.env.VITE_JIRA_HOST || "";
 
 
 type Incident = {
@@ -68,6 +69,25 @@ export default function Dashboard() {
   const [sprintFilter, setSprintFilter] = useState<string>("All");
   const [syncingBoard, setSyncingBoard] = useState<boolean>(false);
   const [liveKPIs, setLiveKPIs] = useState<KPIData | null>(null);
+
+const [labelsData, setLabelsData] = useState<any[]>([]);
+const [labelModal, setLabelModal] = useState<string | null>(null);
+
+
+const {
+  data: labelsQueryData,
+  refetch: refetchLabelBreakdown,
+} = useQuery({
+  queryKey: ["labelBreakdown"],
+  queryFn: () => getLabelBreakdown("both").then((r) => r || { labels: [] }),
+  staleTime: 60_000, // 1 minute
+});
+
+useEffect(() => {
+  setLabelsData((labelsQueryData && labelsQueryData.labels) || []);
+}, [labelsQueryData]);
+
+
 
   // Priority modal state (add near other useState declarations)
 const [priorityModalOpen, setPriorityModalOpen] = useState(false);
@@ -151,7 +171,7 @@ const closeLabelModal = () => { setLabelModalOpen(false); setLabelModalName(null
       const st = (it.status || "").toLowerCase();
       if (st.includes("done") || st.includes("closed") || st.includes("resolved")) closed++;
       else open++;
-      if (HIGH_SEVERITIES.has((it.severity || "").trim())) highSeverity++;
+      if (HIGH_SEV.has((it.severity || "").trim())) highSeverity++;
     }
     return { total, open, closed, highSeverity };
   };
@@ -192,6 +212,25 @@ const handleRefreshBoard = async () => {
       // keep KPIs visible briefly so user sees new counts
       setTimeout(() => setLiveKPIs(null), 1200);
       showMessage("Jira sync completed and dashboard refreshed.");
+      // ensure label breakdown is refreshed so right-side counts update
+      try {
+  // refetchLabelBreakdown() returns a QueryObserverResult — use its `.data`
+  const refetchResult = await refetchLabelBreakdown?.();
+  // refetchResult may be undefined (guard) or a QueryObserverResult with `.data`
+  const newLabelsPayload = refetchResult?.data ?? refetchResult ?? null;
+
+  // normalise/fallback: if the returned value is an object { labels: [...] } use it
+  const newLabels = (newLabelsPayload && (newLabelsPayload.labels || newLabelsPayload)) || [];
+
+  // set local state to the fresh labels array (ensures chart receives updated prop)
+  setLabelsData(Array.isArray(newLabels) ? newLabels : (newLabels.labels ?? []));
+} catch (e) {
+  console.warn("Failed to refetch label breakdown:", e);
+  // as fallback, invalidate so query eventually refreshes and useEffect will pick it up
+  queryClient.invalidateQueries({ queryKey: ["labelBreakdown"] });
+}
+
+
     } else {
       // fallback: if refresh endpoint failed, still try the server-side /sync/board (read-only)
       const res = await api.post("/sync/board", { max_results: 5000 }).then((r) => r.data).catch(() => null);
@@ -506,8 +545,9 @@ if (isLoading) {
       </div>
 
       <h3>Bugs</h3>
-      <div style={{ border: "1px solid #ddd", borderRadius: 6, padding: 8, overflowX: "auto", maxHeight: 380 }}>
-        <div style={{ width: sprintChartWidth, height: 320 }}>
+            <div style={{ border: "1px solid #ddd", borderRadius: 6, padding: 8, overflowX: "auto", maxHeight: 420 }}>
+        {/* scroll container — the inner div can be wider than viewport when many points exist */}
+        <div style={{ width: sprintChartWidth, minWidth: "100%", height: 360 }}>
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={topSeries} margin={{ left: 12, right: 24, bottom: 40 }}>
               <CartesianGrid strokeDasharray="3 3" />
@@ -521,8 +561,14 @@ if (isLoading) {
         </div>
       </div>
 
+       
+      {/* Label Classification — Open vs Closed */}
+      <div style={{ marginTop: "2rem" }}>
+        <LabelBreakdownChart labels={labelsData} onShowList={(name) => setLabelModal(name)} />
+      </div> 
+
       {/* place Priority Breakdown first, Quarter vs Severity second to reduce congestion */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px", alignItems: "stretch", marginTop: "2rem" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(420px, 1fr) minmax(420px, 1fr)", gap: "16px", alignItems: "stretch", marginTop: "2rem" }}>
         {/* Priority Breakdown (left) */}
         <div style={{ border: "1px solid #ddd", borderRadius: 6, padding: 8 }}>
           <h3 style={{ margin: "0 0 8px" }}>Priority Breakdown</h3>
@@ -542,7 +588,7 @@ if (isLoading) {
             </div>
 
             {/* Quick priority counts + show list (right) */}
-            <div style={{ width: 260 }}>
+            <div style={{ maxWidth: 320, width: "40%" }}>
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                 {["P1", "P2", "P3", "P4", "Other"].map((pkey) => {
                   const g = (priorityGroups && (priorityGroups as any)[pkey]) || { count: 0, label: "" };
@@ -716,7 +762,7 @@ if (isLoading) {
                 <td style={{ padding: 8 }}>{it.creation_time}</td>
                 <td style={{ padding: 8 }}>
                   {/* Replace `https://your-jira-host` with your Jira host OR use item.url if you persist it */}
-                  <a className="btn-jira" href={`https://rahulprasad4262.atlassian.net/browse/${it.incident_no}`} target="_blank" rel="noreferrer" title="Open in Jira">➤</a>
+                  <a className="btn-jira" href={`${JIRA_HOST}/browse/${it.incident_no}`} target="_blank" rel="noreferrer" title="Open in Jira">➤</a>
                 </td>
               </tr>
             ));
@@ -738,6 +784,10 @@ if (isLoading) {
       </div>
     </div>
   </div>
+)}
+    
+    {labelModal && (
+  <LabelIssuesModal label={labelModal} onClose={() => setLabelModal(null)} />
 )}
 
 

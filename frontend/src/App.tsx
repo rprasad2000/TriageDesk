@@ -7,7 +7,7 @@ import Retrain from "../pages/Retrain";
 
 export default function App() {
   return (
-    <div className="container">
+    <div className="container-fluid">
       <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "1rem 0" }}>
         <h1 style={{ margin: 0 }}>Defect Classification</h1>
         <nav style={{ display: "flex", gap: 16 }}>

@@ -34,13 +34,22 @@
 
 /* Keep your container but use tokens */
 .container{
-  max-width:var(--max-width);
-  margin:0 auto;
-  padding:var(--space-lg);
-  font-family:system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  color:var(--text);
-  background:var(--bg);
-  -webkit-font-smoothing:antialiased;
+  width: 100%;
+  max-width: 1600px;      /* optional cap for very wide monitors (change to taste) */
+  margin: 0 auto;
+  padding: 24px 36px;     /* wider gutters for demo/professional look */
+  font-family: system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  box-sizing: border-box;
+}
+
+/* optional helper if you want a full-bleed variant */
+.container-fluid{
+  width: 100%;
+  padding: 24px 36px;
+  box-sizing: border-box;
 }
 
 /* Header + nav */
@@ -344,3 +353,20 @@ tbody td{padding:8px;border-bottom:1px solid #f3f3f3}
   0% { background-position: 200% 0; }
   100% { background-position: -200% 0; }
 }
+
+/* Make horizontal scrollbar visible and not clipped */
+.label-chart-scroll {
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Optional: style scrollbars (WebKit) */
+.label-chart-scroll::-webkit-scrollbar {
+  height: 10px;
+}
+.label-chart-scroll::-webkit-scrollbar-thumb {
+  background: rgba(0,0,0,0.18);
+  border-radius: 6px;
+}
+

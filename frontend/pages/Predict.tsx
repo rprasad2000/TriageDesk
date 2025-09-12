@@ -12,7 +12,10 @@ import {
   getSprintsLive,
   syncJira,
   api,
+  postJiraComment,
+  postJiraLabels 
 } from "../src/api";
+const JIRA_HOST = import.meta.env.VITE_JIRA_HOST || "";
 
 type IssueRow = {
   issue_key: string;
@@ -47,6 +50,29 @@ export default function Predict() {
       return await feedback(text, p.true_label);
     },
   });
+
+// const postCommentMut = useMutation<any, Error, { issueKey: string; comment: string }>({
+//   mutationFn: ({ issueKey, comment }) => postJiraComment(issueKey, comment),
+//   // optimistic UI: set updating flag
+//   onMutate: ({ issueKey }) => {
+//     setUpdating(issueKey, true);
+//     return { issueKey };
+//   },
+//   onSuccess: (data, variables) => {
+//     showMessage(`Comment posted to ${variables.issueKey}.`);
+//     // optionally, you may also invalidate queries to refresh issues
+//     queryClient.invalidateQueries({ queryKey: ["issues", selectedSprint] });
+//   },
+//   onError: (err, variables) => {
+//     console.error("Failed to post Jira comment", err);
+//     showMessage("Failed to post comment: " + (err?.message || "unknown error"));
+//   },
+//   onSettled: (_data, _err, variables) => {
+//     if (variables?.issueKey) setUpdating(variables.issueKey, false);
+//   },
+// });
+
+ 
 
   /* --- New: Sprint-based bulk prediction (use cached live sprints) --- */
 
@@ -98,7 +124,7 @@ export default function Predict() {
   const {
     data: issuesFromApi = [],
     isLoading: issuesLoading,
-    refetch: refetchIssues,
+    refetch : refetchIssues,
   } = useQuery<IssueRow[]>({
     queryKey: ["issues", selectedSprint],
     queryFn: () => getIssues(selectedSprint, true),
@@ -209,84 +235,6 @@ export default function Predict() {
       }
 
 
-      // for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      //   await new Promise((res) => setTimeout(res, delayMs));
-      //   let fresh: string[] = [];
-      //   try {
-      //     fresh = await getSprintsLive(true);
-      //   } catch (err) {
-      //     console.warn("getSprintsLive failed during polling:", err);
-      //     fresh = [];
-      //   }
-
-      //   // quick check: detect meaningful change (length + first/last)
-      //   const prevLen = Array.isArray(prevSprints) ? prevSprints.length : 0;
-      //   const freshLen = Array.isArray(fresh) ? fresh.length : 0;
-      //   const arraysDiffer =
-      //     !(
-      //       Array.isArray(prevSprints) &&
-      //       prevLen === freshLen &&
-      //       prevSprints[0] === fresh[0] &&
-      //       prevSprints[prevLen - 1] === fresh[freshLen - 1]
-      //     );
-      //   const pickedUpNew = (freshLen > 0 && arraysDiffer) || (selectedSprint && fresh.includes(selectedSprint));
-
-      //   // if (pickedUpNew) {
-      //   //   // Only write to cache if content actually changed to avoid churn
-      //   //   queryClient.setQueryData(["sprints"], fresh);
-      //   //   // small delay to allow backend corpus write to finish then refetch issues
-      //   //   if (selectedSprint) await new Promise((res) => setTimeout(res, 800));
-      //   //   try {
-      //   //     await refetchIssues();
-      //   //   } catch (e) {
-      //   //     console.warn("refetchIssues failed after sync:", e);
-      //   //   }
-      //   //   success = true;
-      //   //   break;
-      //   // }
-      //   if (pickedUpNew) {
-      //       // Update sprints cache
-      //       queryClient.setQueryData(["sprints"], fresh);
-
-      //       // Force a fresh issues fetch directly from server (bypass caches)
-      //       try {
-      //         // prefer strict params to hit same server path as your useQuery
-      //         const params: any = { max_results: 5000 };
-      //         if (selectedSprint) params.sprint = selectedSprint;
-      //         // force network freshness by sending Cache-Control header
-      //         const resp = await api.get("/issues", {
-      //           params,
-      //           headers: { "Cache-Control": "no-cache" },
-      //         });
-      //         const freshIssues = resp?.data;
-
-      //         if (Array.isArray(freshIssues)) {
-      //           // eagerly write fresh issues into react-query cache so UI updates immediately
-      //           queryClient.setQueryData(["issues", selectedSprint], freshIssues);
-      //           // also ensure the react-query stored query is marked fresh
-      //           queryClient.invalidateQueries({ queryKey: ["issues", selectedSprint] });
-      //           // small delay to ensure backend completed any final writes
-      //           await new Promise((r) => setTimeout(r, 300));
-      //         } else {
-      //           // fallback: call refetchIssues if direct fetch didn't return array
-      //           try { await refetchIssues(); } catch (e) { console.warn("refetchIssues fallback failed", e); }
-      //         }
-      //       } catch (e) {
-      //         console.warn("Forced issues fetch after sync failed:", e);
-      //         // fallback to refetch
-      //         try { await refetchIssues(); } catch (err) { console.warn("refetchIssues fallback failed", err); }
-      //       }
-
-      //       success = true;
-      //       break;
-      //     }
-
-
-      //   // if we were on last attempt, still attempt a final update if fresh non-empty and prev empty
-      //   if (attempt === maxAttempts - 1 && freshLen > 0 && (!Array.isArray(prevSprints) || prevLen === 0)) {
-      //     queryClient.setQueryData(["sprints"], fresh);
-      //   }
-      // }
             // robust polling: compare issue-level content instead of relying on sprints list alone
       const prevMap = new Map<string, { severity?: string; prediction?: string }>();
       for (const it of (issues || [])) {
@@ -315,11 +263,26 @@ export default function Predict() {
           const freshIssues: IssueRow[] = Array.isArray(resp?.data) ? resp.data : [];
 
           // quick heuristic: if number of issues changed, accept as update
-          if (freshIssues.length !== (issues?.length ?? 0)) {
+          // if (freshIssues.length !== (issues?.length ?? 0)) {
+          //   queryClient.setQueryData(["issues", selectedSprint], freshIssues);
+          //   success = true;
+          //   break;
+          // }
+                    if (freshIssues.length !== (issues?.length ?? 0)) {
+            // Update react-query cache so subscribers see updated list
             queryClient.setQueryData(["issues", selectedSprint], freshIssues);
+            // Also update local component state we render from
+            setIssues(Array.isArray(freshIssues) ? [...freshIssues] : []);
+            // Ensure hook consumers do a fresh network fetch (defensive)
+            try {
+              await refetchIssues?.();
+            } catch (e) {
+              console.warn("refetchIssues failed after sync:", e);
+            }
             success = true;
             break;
           }
+
 
           // compare per-issue important fields (severity, prediction). If any difference, we have fresh data.
           let foundDiff = false;
@@ -341,14 +304,32 @@ export default function Predict() {
             }
           }
 
-          if (foundDiff) {
+          // if (foundDiff) {
+          //   // write fresh issues into react-query cache so UI updates immediately
+          //   queryClient.setQueryData(["issues", selectedSprint], freshIssues);
+          //   // mark stale/invalidate to keep react-query happy
+          //   queryClient.invalidateQueries({ queryKey: ["issues", selectedSprint] });
+          //   success = true;
+          //   break;
+          // }
+
+                    if (foundDiff) {
             // write fresh issues into react-query cache so UI updates immediately
             queryClient.setQueryData(["issues", selectedSprint], freshIssues);
+            // also update our local `issues` state so rows re-render instantly
+            setIssues(Array.isArray(freshIssues) ? [...freshIssues] : []);
             // mark stale/invalidate to keep react-query happy
             queryClient.invalidateQueries({ queryKey: ["issues", selectedSprint] });
+            // force a refetch to be 100% sure subscribers get the latest from server
+            try {
+              await refetchIssues?.();
+            } catch (e) {
+              console.warn("refetchIssues failed after sync diff:", e);
+            }
             success = true;
             break;
           }
+
 
           // otherwise continue polling
         } catch (e) {
@@ -390,6 +371,102 @@ export default function Predict() {
     }
   };
 
+//   const handlePostJiraComment = async (issueKey: string, prediction?: string) => {
+//   if (!issueKey) return showMessage("Invalid issue key");
+//   // if you want prediction included, require it
+//   if (!prediction) return showMessage("No prediction available — run prediction first.");
+//   const comment = `This is an automated message.\nDetected Issue: ${prediction}.\nKindly reach out to ${prediction} team.`;
+//   const ok = await showConfirm(`Post the following comment to ${issueKey}?\n\n${comment}`);
+//   if (!ok) return;
+//   postCommentMut.mutate({ issueKey, comment });
+// };
+
+// open dialog when user clicks Update Jira button
+const openUpdateDialog = (issueKey: string, prediction?: string) => {
+  setUpdateDialogIssue({ issueKey, prediction });
+  setUpdateLabelChecked(true);     // set sensible defaults
+  setUpdateCommentChecked(true);
+  // prefill editable comment text with default message (uses prediction if available)
+  setUpdateCommentText(defaultAutomatedComment(prediction));
+  setUpdateDialogOpen(true);
+};
+
+// confirm handler that actually performs API calls
+const confirmUpdateDialog = async () => {
+  if (!updateDialogIssue) return setUpdateDialogOpen(false);
+  const { issueKey, prediction } = updateDialogIssue;
+  if (!issueKey) return setUpdateDialogOpen(false);
+
+  // if user chose label update but no prediction -> warn
+  if (updateLabelChecked && !prediction) {
+    showMessage("No prediction available to use as label.");
+    return;
+  }
+
+    // If comment requested, ensure text is non-empty
+  if (updateCommentChecked && (!updateCommentText || !updateCommentText.trim())) {
+    showMessage("Comment is empty. Either uncheck 'Add comment' or provide comment text.");
+    return;
+  }
+  setUpdateDialogOpen(false);
+
+  // mark only this issue as loading
+  setIssueLoading(issueKey, true);
+  try {
+    // perform label update first (if selected)
+    if (updateLabelChecked && prediction) {
+      try {
+        await postJiraLabels(issueKey, prediction, "add");
+      } catch (err) {
+        console.error("Failed to update label:", err);
+        showMessage("Failed to update label: " + (err as any)?.message || "");
+      }
+    }
+
+    // perform comment add (if selected)
+    if (updateCommentChecked) {
+      try {
+        await postJiraComment(issueKey, updateCommentText);
+      } catch (err) {
+        console.error("Failed to post comment:", err);
+        showMessage("Failed to post comment: " + (err as any)?.message || "");
+      }
+    }
+
+    showMessage("Jira update(s) completed.");
+  } finally {
+    setIssueLoading(issueKey, false);
+  }
+};
+
+
+
+  // --- add this inside the Predict() component (e.g. right after handleRefreshFromJira) ---
+const handleLoadIssuesForce = async () => {
+  if (!selectedSprint) return;
+  try {
+    // optional quick UI guard: we already have issuesLoading from useQuery so reuse that for disabling button
+    // Force a network fetch (bypass caches) and get the freshest issues for the selected sprint
+    const resp = await api.get("/issues", {
+      params: { sprint: selectedSprint, max_results: 5000 },
+      headers: { "Cache-Control": "no-cache", Pragma: "no-cache" },
+    });
+    const freshIssues: IssueRow[] = Array.isArray(resp?.data) ? resp.data : [];
+
+    // Immediately update react-query cache so UI updates instantly
+    queryClient.setQueryData(["issues", selectedSprint], freshIssues);
+    // Mark queries stale/invalidate so react-query consumers update cleanly
+    queryClient.invalidateQueries({ queryKey: ["issues", selectedSprint] });
+
+    // (optional) also update local state if you want immediate setIssues — not required because useQuery consumers will read cache
+    setIssues(Array.isArray(freshIssues) ? [...freshIssues] : []);
+  } catch (err) {
+    console.error("Failed to force-load issues:", err);
+    showMessage("Failed to load issues from server. Try Refresh from Jira.");
+  }
+};
+
+ 
   // keep local `issues` state but only update it when content actually changed (prevents setState churn)
   const [issues, setIssues] = useState<IssueRow[]>([]);
   const prevIssuesRef = useRef<IssueRow[] | undefined>(undefined);
@@ -401,6 +478,27 @@ export default function Predict() {
     }
     // depend only on the data itself
   }, [issuesFromApi]);
+
+  // per-issue "posting" map to show posting state only for the clicked row
+const [updatingMap, setUpdatingMap] = useState<Record<string, boolean>>({});
+const setUpdating = (key: string, val: boolean) => setUpdatingMap(p => ({ ...p, [key]: val }));
+
+// dialog state for update options:
+const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
+const [updateDialogIssue, setUpdateDialogIssue] = useState<{ issueKey: string; prediction?: string } | null>(null);
+const [updateLabelChecked, setUpdateLabelChecked] = useState(true);
+const [updateCommentChecked, setUpdateCommentChecked] = useState(true);
+
+// helper to set per-issue loading
+const setIssueLoading = (key: string | null, val: boolean) => {
+  if (!key) return;
+  setUpdatingMap(prev => ({ ...prev, [key]: val }));
+};
+
+// NEW: editable comment text shown in dialog
+const defaultAutomatedComment = (pred?: string) =>
+  `This is an automated message.\nDetected: ${pred ?? "<prediction>"}.\nKindly reach out to XYZ team.`;
+const [updateCommentText, setUpdateCommentText] = useState<string>("");
 
   // Modal state for recommendations popup
   const [recsModalOpen, setRecsModalOpen] = useState<boolean>(false);
@@ -623,13 +721,14 @@ export default function Predict() {
             ))}
           </select>
 
-          <button
-              onClick={() => refetchIssues()}
-              disabled={!selectedSprint || issuesLoading}
-              className="btn btn-dark btn-pill"
-            >
-              {issuesLoading ? <span className="spinner" /> : "Load issues"}
-          </button>
+         {/* <button
+            onClick={handleLoadIssuesForce}
+            disabled={!selectedSprint || issuesLoading}
+            className="btn btn-dark btn-pill"
+          >
+            {issuesLoading ? <span className="spinner" /> : "Load issues"}
+          </button> */}
+
 
 
           <button
@@ -669,7 +768,9 @@ export default function Predict() {
               </tr>
             </thead>
             <tbody>
-              {issues.map((it, idx) => (
+              {issues.map((it, idx) => {
+                const isUpdating = !!updatingMap[it.issue_key ?? ""];
+                return(
                 <tr key={it.issue_key || idx} style={{ borderBottom: "1px solid #f3f3f3" }}>
                   <td style={{ padding: 6, width: 28 }}>
                     <input type="checkbox" checked={!!selectedMap[it.issue_key]} onChange={() => toggleSelect(it.issue_key)} />
@@ -690,6 +791,41 @@ export default function Predict() {
                     <button className="btn-primary" onClick={() => handleRowPredict(it.issue_key)}>Predict</button>
                     <input placeholder="Correct label" value={fbInputs[it.issue_key] || ""} onChange={(e) => setFbInput(it.issue_key, e.target.value)} style={{ width: 130 }} />
                     <button className="btn-dark btn-pill" onClick={() => handleRowFeedback(it)}>Save</button>
+                    {/* open in Jira */}
+                    <a
+                      className="btn-jira"
+                      href={`${JIRA_HOST}/browse/${it.issue_key}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      title="Open in Jira"
+                      style={{ marginLeft: 6 }}
+                    >
+                      ➤
+                    </a>
+
+                    {/* update (comment) in Jira */}
+                    {/* <button
+                        className="btn btn-dark btn-pill"
+                        onClick={() => handlePostJiraComment(it.issue_key!, it.prediction)}
+                        disabled={!!updatingMap[it.issue_key!] || !it.prediction}
+                        style={{ marginLeft: 6 }}
+                        title="Post automated comment to Jira"
+                      >
+                        {updatingMap[it.issue_key!] ? "Posting…" : "Update Jira"}
+                      </button> */}
+ 
+
+                      <button
+                        className="btn btn-dark"
+                        onClick={() => openUpdateDialog(it.issue_key!, it.prediction)}
+                        disabled={isUpdating || !it.prediction}
+                        style={{ marginLeft: 6 }}
+                        title="Post automated updates to Jira"
+                      >
+                        {isUpdating ? "Posting…" : "Update Jira"}
+                      </button>
+
+
                     {/* replace old Recs button with this */}
                     {!!it.recommendations?.length && (
                       <button
@@ -707,7 +843,8 @@ export default function Predict() {
 
                   </td>
                 </tr>
-              ))}
+                );
+            })}
             </tbody>
           </table>
         </div>
@@ -716,13 +853,6 @@ export default function Predict() {
           <button className="btn-dark" onClick={handleBulkFeedbackFromSelected} disabled={bulkFeedbackLoading || selectedKeys.length === 0}>
             {bulkFeedbackLoading ? "Saving…" : `Save feedback for selected (${selectedKeys.length})`}
           </button>
-          {/* <button
-            onClick={() => {
-              refetchIssues();
-            }}
-          >
-            Refresh
-          </button> */}
         </div>
       </div>
       {/* Recommendations modal */}
@@ -803,6 +933,73 @@ export default function Predict() {
     </div>
   </div>
 )}
+
+{updateDialogOpen && updateDialogIssue && (
+  <div
+    className="modal-overlay"
+    role="dialog"
+    aria-modal="true"
+    onClick={(e) => { if (e.target === e.currentTarget) setUpdateDialogOpen(false); }}
+  >
+    <div className="modal-panel" role="document" style={{ maxWidth: 520 }}>
+      <h3 style={{ marginTop: 0 }}>Update Jira — {updateDialogIssue.issueKey}</h3>
+
+      <div style={{ marginTop: 8 }}>
+        <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <input
+            type="checkbox"
+            checked={updateLabelChecked}
+            onChange={(e) => setUpdateLabelChecked(e.target.checked)}
+          />
+          <span>
+            Update label to predicted value{" "}
+            <small style={{ color: "#666", marginLeft: 6 }}>
+              {updateDialogIssue.prediction ? `(${updateDialogIssue.prediction})` : "(no prediction)"}
+            </small>
+          </span>
+        </label>
+
+        <label style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
+          <input
+            type="checkbox"
+            checked={updateCommentChecked}
+            onChange={(e) => setUpdateCommentChecked(e.target.checked)}
+          />
+          <span>Add / edit the automated comment</span>
+        </label>
+
+        {/* NEW: editable comment textarea */}
+        <div style={{ marginTop: 10 }}>
+          <textarea
+            value={updateCommentText}
+            onChange={(e) => setUpdateCommentText(e.target.value)}
+            rows={6}
+            style={{
+              width: "100%",
+              resize: "vertical",
+              padding: 8,
+              fontFamily: "inherit",
+              fontSize: 14,
+              borderRadius: 6,
+              border: "1px solid #ddd",
+            }}
+            disabled={!updateCommentChecked}
+          />
+          <div style={{ marginTop: 6, color: "#666", fontSize: 12, display: "flex", justifyContent: "space-between" }}>
+            <div>{updateCommentText.length} characters</div>
+            <div>{updateCommentText.split("\n").length} lines</div>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 18 }}>
+        <button className="btn btn-ghost btn-pill" onClick={() => setUpdateDialogOpen(false)} type="button">Cancel</button>
+        <button className="btn btn-primary btn-pill" onClick={confirmUpdateDialog} type="button">OK</button>
+      </div>
+    </div>
+  </div>
+)}
+
 
 
     </div>

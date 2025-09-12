@@ -41,3 +41,30 @@ export const syncJira = (sprint?: string, force = false) => {
 
 
 
+// Fetch aggregated label breakdown (open/closed/total counts)
+export const getLabelBreakdown = async (status: "open" | "closed" | "both" = "both") => {
+  const res = await api.get("/labels", { params: { status } });
+  return res.data; // { labels: [...], other_count, total_labels }
+};
+
+// Fetch issues for a given label (with status filter)
+export const getLabelIssues = async (
+  label: string,
+  status: "open" | "closed" | "both" = "both",
+  max_results = 2000
+) => {
+  const res = await api.get(`/labels/${encodeURIComponent(label)}/issues`, {
+    params: { status, max_results },
+  });
+  return res.data; // { label, status, count, issues: [...] }
+};
+
+// export const postJiraComment = (issueKey: string, comment: string) =>
+//   api.post(`/issues/${issueKey}/comment`, { comment });
+
+// add near postJiraComment in api.ts
+export const postJiraComment = (issueKey: string, comment: string) =>
+  api.post(`/issues/${encodeURIComponent(issueKey)}/comment`, { comment }).then(r => r.data);
+
+export const postJiraLabels = (issueKey: string, label: string, mode: "add" | "replace" = "add") =>
+  api.post(`/issues/${encodeURIComponent(issueKey)}/labels`, { label, mode }).then(r => r.data);

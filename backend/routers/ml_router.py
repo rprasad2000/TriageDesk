@@ -9,6 +9,9 @@ import tempfile
 import time
 from fastapi import BackgroundTasks
 import asyncio
+import httpx
+from urllib.parse import quote as url_quote
+
 
 
 from services.model_service import (
@@ -19,6 +22,8 @@ from services.model_service import (
     save_feedback,
     retrain_with_feedback,
     build_df_from_jira_issues,
+    get_issues_for_label,
+    compute_label_breakdown
     
 )
 from utilities.jira_utility import JiraUtility
@@ -165,7 +170,12 @@ async def _sync_jira_worker(sprint: Optional[str], max_results: int, warnings_ou
 
         # update metadata
         try:
-            sprints = sorted([s for s in combined["sprint"].astype(str).unique() if s and str(s).strip()])
+            sprints = sorted([
+            str(s).strip()
+            for s in df["sprint"].dropna().unique()
+            if str(s).strip().lower() not in ("", "nan", "none")
+        ])
+
             meta = {"last_sync": pd.Timestamp.now().isoformat(), "sprints": sprints, "n_issues": int(combined.shape[0])}
             LAST_SYNC_PATH.write_text(json.dumps(meta))
         except Exception as e:
@@ -598,6 +608,160 @@ def get_issues(sprint: Optional[str] = None, openOnly: bool = True):
         })
     return out
 
+@router.post("/issues/{issue_key}/comment")
+async def post_jira_comment(issue_key: str, comment: Dict[str, str] = Body(...)):
+    """
+    Post a plain-text comment to a Jira issue.
+    Body: { "comment": "text to post" }
+    """
+    if not issue_key:
+        raise HTTPException(status_code=400, detail="Missing issue key")
+    text = comment.get("comment") if isinstance(comment, dict) else None
+    if not text or not str(text).strip():
+        raise HTTPException(status_code=400, detail="Missing comment text")
+
+    jira = JiraUtility(HOST, USERNAME, API_TOKEN)
+
+    # Try existing helper methods on JiraUtility first (support both sync/async)
+    try:
+        if hasattr(jira, "add_comment"):
+            maybe = jira.add_comment(issue_key, text)
+            if asyncio.iscoroutine(maybe):
+                resp = await maybe
+            else:
+                resp = maybe
+            return {"ok": True, "data": resp}
+        if hasattr(jira, "post_comment"):
+            maybe = jira.post_comment(issue_key, text)
+            if asyncio.iscoroutine(maybe):
+                resp = await maybe
+            else:
+                resp = maybe
+            return {"ok": True, "data": resp}
+    except Exception as e:
+        # log and continue to REST fallback (don't fail immediately)
+        print(f"[WARN] JiraUtility comment helper failed: {e}")
+
+    # REST fallback using Jira Cloud API
+    try:
+        auth = httpx.BasicAuth(USERNAME, API_TOKEN)
+        base = HOST.rstrip("/")
+        quoted_key = url_quote(issue_key, safe="")
+        url = f"{base}/rest/api/2/issue/{quoted_key}/comment"
+
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.post(url, json={"body": text}, auth=auth, headers={"Content-Type": "application/json"})
+            resp.raise_for_status()
+            return {"ok": True, "data": resp.json()}
+    except httpx.HTTPStatusError as he:
+        body = "<unreadable response body>"
+        try:
+            body = he.response.text
+        except Exception:
+            pass
+        # HTTP upstream error — surface as 502
+        raise HTTPException(status_code=502, detail=f"Jira returned status {he.response.status_code}: {body}")
+    except Exception as e:
+        # unexpected failure posting comment
+        raise HTTPException(status_code=500, detail=f"Failed to post comment to Jira: {e}")
+
+@router.post("/issues/{issue_key}/labels")
+async def post_jira_labels(issue_key: str, payload: Dict[str, Any] = Body(...)):
+    """
+    Update labels for a Jira issue.
+    Body: { "label": "NewLabel", "mode": "add" | "replace" }
+    - 'add' appends label (if not present)
+    - 'replace' overwrites labels with provided label
+    """
+    if not issue_key:
+        raise HTTPException(status_code=400, detail="Missing issue key")
+    label = payload.get("label") if isinstance(payload, dict) else None
+    mode = (payload.get("mode") if isinstance(payload, dict) else "add") or "add"
+    if not label or not str(label).strip():
+        raise HTTPException(status_code=400, detail="Missing label")
+
+    # sanitize label for Jira: labels are tokens (no spaces preferred)
+    label_str = str(label).strip()
+    # optionally replace spaces with underscore to avoid Jira label rules
+    sanitized = label_str.replace(" ", "_")
+
+    jira = JiraUtility(HOST, USERNAME, API_TOKEN)
+
+    # try helper on JiraUtility if available
+    try:
+        # Some utilities may expose add_label / set_labels / update_issue_fields
+        if hasattr(jira, "add_label"):
+            maybe = jira.add_label(issue_key, sanitized)
+            if asyncio.iscoroutine(maybe):
+                resp = await maybe
+            else:
+                resp = maybe
+            return {"ok": True, "labels": resp}
+        if hasattr(jira, "set_labels"):
+            if mode == "replace":
+                maybe = jira.set_labels(issue_key, [sanitized])
+            else:
+                maybe = jira.set_labels(issue_key, [sanitized], append=True)  # if signature supports append
+            if asyncio.iscoroutine(maybe):
+                resp = await maybe
+            else:
+                resp = maybe
+            return {"ok": True, "labels": resp}
+        if hasattr(jira, "update_issue_fields"):
+            # attempt to fetch current then update
+            maybe_issue = jira.get_issue(issue_key)
+            if asyncio.iscoroutine(maybe_issue):
+                issue_info = await maybe_issue
+            else:
+                issue_info = maybe_issue
+            current = issue_info.get("fields", {}).get("labels", []) if issue_info else []
+            if mode == "replace":
+                new_labels = [sanitized]
+            else:
+                new_labels = list(dict.fromkeys((current or []) + [sanitized]))
+            upd = jira.update_issue_fields(issue_key, {"labels": new_labels})
+            if asyncio.iscoroutine(upd):
+                await upd
+            return {"ok": True, "labels": new_labels}
+    except Exception as e:
+        print(f"[WARN] JiraUtility labels helper failed: {e}")
+
+    # REST fallback: fetch issue then edit fields.labels using issue edit (PUT)
+    try:
+        auth = httpx.BasicAuth(USERNAME, API_TOKEN)
+        base = HOST.rstrip("/")
+        quoted_key = url_quote(issue_key, safe="")
+        get_url = f"{base}/rest/api/2/issue/{quoted_key}?fields=labels"
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.get(get_url, auth=auth, headers={"Accept": "application/json"})
+            r.raise_for_status()
+            issue_json = r.json()
+            current_labels = issue_json.get("fields", {}).get("labels", []) or []
+
+            if mode == "replace":
+                new_labels = [sanitized]
+            else:
+                # append if not exists
+                new_labels = list(dict.fromkeys(current_labels + [sanitized]))
+
+            edit_url = f"{base}/rest/api/2/issue/{quoted_key}"
+            # Jira edit payload: {"update": {"labels":[{"set": [...]}]}} or fields direct
+            # Simpler: use "fields" to replace labels in one go
+            payload = {"fields": {"labels": new_labels}}
+            resp = await client.put(edit_url, json=payload, auth=auth, headers={"Content-Type": "application/json"})
+            resp.raise_for_status()
+            return {"ok": True, "labels": new_labels}
+    except httpx.HTTPStatusError as he:
+        body = "<unreadable response body>"
+        try:
+            body = he.response.text
+        except Exception:
+            pass
+        raise HTTPException(status_code=502, detail=f"Jira returned status {he.response.status_code}: {body}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update labels: {e}")
+
+
 # POST /predict/bulk
 @router.post("/predict/bulk")
 def predict_bulk(req: BulkPredictRequest):
@@ -656,6 +820,37 @@ def feedback_bulk(req: BulkFeedbackRequest):
                     txt = r.iloc[0]["ticket_description"]
         save_feedback(txt, e["true_label"], source=e.get("source","user"))
     return {"message": "saved", "n": len(req.entries)}
+
+
+# ================================================
+# Label Breakdown & Issues (for Label Classification chart)
+# ================================================
+
+@router.get("/labels")
+def get_labels(top_n: int = 20, status: str = "both"):
+    """
+    Return label classification breakdown with counts of open/closed/total.
+    status: 'open' | 'closed' | 'both'
+    """
+    try:
+        breakdown = compute_label_breakdown(top_n=top_n, status_filter=status)
+        return breakdown
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to compute label breakdown: {e}")
+
+
+@router.get("/labels/{label_name}/issues")
+def get_label_issues(label_name: str, status: str = "both", max_results: int = 2000):
+    """
+    Return list of issues for a given label.
+    status: 'open' | 'closed' | 'both'
+    """
+    try:
+        issues = get_issues_for_label(label_name, status_filter=status, max_results=max_results)
+        return {"label": label_name, "status": status, "count": len(issues), "issues": issues}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch issues for label '{label_name}': {e}")
+
 
 @router.get("/validate-jira")
 async def validate_jira():
