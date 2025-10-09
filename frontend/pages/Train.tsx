@@ -200,7 +200,7 @@ const renderResult = (data: any) => {
         <h3>Train from Jira</h3>
         <button
           type="button"
-          className="btn btn-primary btn-pill"
+          className="btn-recs"
           onClick={() => mJira.mutate()}
           disabled={mJira.isPending}
         >
@@ -221,7 +221,7 @@ const renderResult = (data: any) => {
 
         <button
           type="button"
-          className="btn btn-primary btn-pill"
+          className="btn-recs"
           onClick={() => mCsv.mutate()}
           disabled={mCsv.isPending}
         >

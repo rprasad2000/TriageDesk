@@ -1,4 +1,3 @@
-# backend/routers/ml_router.py
 from fastapi import APIRouter, HTTPException, UploadFile, File, Body, Query
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
@@ -11,8 +10,10 @@ from fastapi import BackgroundTasks
 import asyncio
 import httpx
 from urllib.parse import quote as url_quote
+import logging
 
-
+from fastapi import Query, HTTPException
+from typing import Optional
 
 from services.model_service import (
     DATA_DIR,
@@ -37,6 +38,11 @@ HOST = CFG["JIRA"]["HOST"]
 USERNAME = CFG["JIRA"]["USERNAME"]
 API_TOKEN = CFG["JIRA"]["API_TOKEN"]
 PROJECT_KEY = CFG["JIRA"]["PROJECT_KEY"]
+
+
+# logging
+logger = logging.getLogger("ml_router")
+logging.basicConfig(level=logging.INFO)
 
 
 # ---- Schemas ----
@@ -82,7 +88,35 @@ def _safe_predict(text: str, top_k: int = 3) -> Dict[str, Any]:
         return {"prediction": "", "confidence": 0.0, "recommendations": []}
     except Exception:
         return {"prediction": "", "confidence": 0.0, "recommendations": []}
-    
+
+
+# --- New helper: normalize Jira payloads (accept raw dict or list)
+def _normalize_jira_issues_payload(payload) -> List[Dict[str, Any]]:
+    """
+    Accept either:
+      - a list of issue dicts (what the rest of the code expects)
+      - the raw Jira response dict that contains 'issues' key
+    Return a list (possibly empty).
+    """
+    if payload is None:
+        return []
+    # If already a list of issues
+    if isinstance(payload, list):
+        return payload
+    # If payload is a dict returned by httpx/requests.json()
+    if isinstance(payload, dict):
+        if "issues" in payload and isinstance(payload["issues"], list):
+            return payload["issues"]
+        # some helpers wrap under 'data'
+        if "data" in payload and isinstance(payload["data"], dict) and "issues" in payload["data"]:
+            return payload["data"]["issues"]
+        # otherwise try heuristics: return first list value
+        for v in payload.values():
+            if isinstance(v, list):
+                return v
+    # fallback
+    return []
+
 # move/define a sync worker that performs the heavy lifting (refactor of existing code)
 async def _sync_jira_worker(sprint: Optional[str], max_results: int, warnings_out: Optional[list] = None):
     """
@@ -96,11 +130,13 @@ async def _sync_jira_worker(sprint: Optional[str], max_results: int, warnings_ou
         last_exc = None
         for attempt in range(max_attempts):
             try:
-                issues = await jira.get_issues(jql=jql, max_results=max_results)
+                raw = await jira.get_issues(jql=jql, max_results=max_results)
+                issues = _normalize_jira_issues_payload(raw)
+                logger.info(f"_try_get_issues attempt={attempt+1} fetched {len(issues)} issues")
                 return issues or []
             except Exception as e:
                 last_exc = e
-                time.sleep(backoff * (attempt + 1))
+                await asyncio.sleep(backoff * (attempt + 1))
         # if all attempts failed, raise last exception
         raise last_exc
 
@@ -137,7 +173,9 @@ async def _sync_jira_worker(sprint: Optional[str], max_results: int, warnings_ou
         else:
             jql = f"project = '{PROJECT_KEY}' AND issuetype = Bug ORDER BY created DESC"
             try:
-                issues = await _try_get_issues(jql)
+                raw = await jira.get_issues(jql=jql, max_results=max_results)
+                issues = _normalize_jira_issues_payload(raw)
+                logger.info(f"_sync_jira_worker fetched {len(issues)} issues for no-sprint sync")
             except Exception as e:
                 warn_list.append(f"Failed to fetch issues from Jira: {e}")
                 issues = []
@@ -171,13 +209,13 @@ async def _sync_jira_worker(sprint: Optional[str], max_results: int, warnings_ou
         # update metadata
         try:
             sprints = sorted([
-            str(s).strip()
-            for s in df["sprint"].dropna().unique()
-            if str(s).strip().lower() not in ("", "nan", "none")
-        ])
-
+                str(s).strip()
+                for s in combined.get("sprint", pd.Series([], dtype=object)).dropna().unique()
+                if str(s).strip().lower() not in ("", "nan", "none")
+            ])
             meta = {"last_sync": pd.Timestamp.now().isoformat(), "sprints": sprints, "n_issues": int(combined.shape[0])}
             LAST_SYNC_PATH.write_text(json.dumps(meta))
+
         except Exception as e:
             warn_list.append(f"Failed to write last_sync metadata: {e}")
 
@@ -197,7 +235,9 @@ async def sync_board(max_results: int = 2000):
     jira = JiraUtility(HOST, USERNAME, API_TOKEN)
     try:
         jql = f"project = '{PROJECT_KEY}' AND issuetype = Bug ORDER BY created DESC"
-        issues = await jira.get_issues(jql=jql, max_results=max_results)
+        raw = await jira.get_issues(jql=jql, max_results=max_results)
+        issues = _normalize_jira_issues_payload(raw)
+        logger.info(f"/sync/board: fetched {len(issues)} issues from Jira (raw type {type(raw)})")
         if not issues:
             return {"status": "ok", "message": "no issues found", "updated_sprints": [], "n_issues": 0, "last_sync": pd.Timestamp.now().isoformat()}
 
@@ -206,13 +246,7 @@ async def sync_board(max_results: int = 2000):
         # compute sprints found (parsed by build_df_from_jira_issues)
         sprints = sorted([s for s in df["sprint"].astype(str).unique() if s and str(s).strip()])
 
-        # basic counts for dashboard KPIs
-        # total = int(df.shape[0])
-        # open_count = int(df[~df["status"].str.lower().isin(["done","closed","resolved"])].shape[0]) if "status" in df.columns else total
-        # closed_count = total - open_count
-        # high_sev_vals = {"Blocker","Critical","High"}
-        # high_sev_count = int(df[df.get("severity", "").astype(str).isin(high_sev_vals)].shape[0]) if "severity" in df.columns else 0
-                # basic counts for dashboard KPIs (defensive / canonical)
+        # basic counts for dashboard KPIs (defensive / canonical)
         total = int(df.shape[0])
         # normalize lower-case status safely
         if "status" in df.columns:
@@ -225,7 +259,6 @@ async def sync_board(max_results: int = 2000):
         # canonical high severity values (keep in sync with frontend HIGH_SEV)
         high_sev_vals = {"Blocker", "Critical", "Major"}
         if "severity" in df.columns:
-            # ensure strings and exact-match set membership
             sev_series = df["severity"].astype(str).str.strip()
             high_sev_count = int(sev_series[sev_series.isin(high_sev_vals)].shape[0])
         else:
@@ -240,32 +273,105 @@ async def sync_board(max_results: int = 2000):
             "kpis": {"total": total, "open": open_count, "closed": closed_count, "highSeverity": high_sev_count}
         }
     except Exception as e:
+        logger.exception("sync_board failed")
         return {"status": "error", "detail": str(e)}
 
+
+# @router.get("/incidents")
+# async def get_incidents(
+#     max_results: int = Query(2000, description="Max issues to fetch"),
+#     issuetype: Optional[str] = Query("Bug", description="Jira issuetype to query (e.g. Bug, Story). Set to '' to not filter by issuetype")
+# ):
+#     """
+#     Fetch issues from Jira, enrich with predictions.
+#     Returns full list (up to max_results). If no issues found, returns an empty list (200).
+#     """
+#     # build JQL depending on issuetype param (allow empty to skip issuetype filter)
+#     if issuetype and str(issuetype).strip():
+#         jql = f"""project = '{PROJECT_KEY}' AND issuetype = {issuetype} ORDER BY created DESC"""
+#     else:
+#         jql = f"""project = '{PROJECT_KEY}' ORDER BY created DESC"""
+
+#     jira = JiraUtility(HOST, USERNAME, API_TOKEN)
+#     try:
+#         raw = await jira.get_issues(jql=jql, max_results=max_results)
+#     except Exception as e:
+#         # surface upstream errors clearly
+#         raise HTTPException(status_code=502, detail=f"Failed to query Jira: {e}")
+
+#     # Normalize payload (accept raw dict from helper or list)
+#     issues = _normalize_jira_issues_payload(raw)
+#     logger.info(f"GET /incidents -> Jira returned raw type {type(raw)}, normalized issues: {len(issues)}")
+
+#     # If no issues found, return an empty list (frontend can show message)
+#     if not issues:
+#         return []
+
+#     df = build_df_from_jira_issues(issues, HOST)
+
+#     enriched = []
+#     for _, row in df.iterrows():
+#         pred = _safe_predict(row["ticket_description"], top_k=3)
+#         enriched.append({
+#             "incident_no": row.get("issue_key", ""),
+#             "creation_time": row.get("created", ""),
+#             "priority": row.get("priority", ""),
+#             "brief_detail": row.get("summary", ""),
+#             "description": row.get("ticket_description", ""),
+#             "status": row.get("status", ""),
+#             "severity": row.get("severity", ""),
+#             "root_cause": row.get("root_cause", ""),
+#             "prediction": pred.get("prediction", ""),
+#             "confidence_score": round(pred.get("confidence", 0.0) * 100, 2),
+#             "recommendation": pred.get("recommendations", []),
+#             # also include sprint if present in Jira payload
+#             "Sprint": row.get("sprint", "") if "sprint" in row else "",
+#         })
+#     return enriched
+
+# @router.get("/incidents/for-scatter")
+# async def incidents_for_scatter(max_results: int = Query(1000), issuetype: Optional[str] = Query("Bug")):
+#     """
+#     Compatibility alias for older frontend calls that requested `/incidents/for-scatter`.
+#     Delegates to the existing /incidents endpoint implementation.
+#     """
+#     # call the existing handler defined in this file
+#     return await get_incidents(max_results=max_results, issuetype=issuetype)
+
+# Replace the existing endpoints with this code
+
+
+_OPEN_STATUSES = {"open", "in progress", "inprogress", "reopened", "re-opened", "re-open", "re open"}
 
 @router.get("/incidents")
 async def get_incidents(
     max_results: int = Query(2000, description="Max issues to fetch"),
-    issuetype: Optional[str] = Query("Bug", description="Jira issuetype to query (e.g. Bug, Story). Set to '' to not filter by issuetype")
+    issuetype: Optional[str] = Query("Bug", description="Jira issuetype to query (e.g. Bug, Story). Set to '' to not filter by issuetype"),
+    sprint: Optional[str] = Query(None, description="Sprint name to filter (exact match)"),
 ):
     """
-    Fetch issues from Jira, enrich with predictions.
-    Returns full list (up to max_results). If no issues found, returns an empty list (200).
+    Return enriched issues for Dashboard (no unlabeled/status-only filtering here).
     """
-    # build JQL depending on issuetype param (allow empty to skip issuetype filter)
+    # build JQL
+    jql_parts = [f"project = '{PROJECT_KEY}'"]
     if issuetype and str(issuetype).strip():
-        jql = f"""project = '{PROJECT_KEY}' AND issuetype = {issuetype} ORDER BY created DESC"""
-    else:
-        jql = f"""project = '{PROJECT_KEY}' ORDER BY created DESC"""
+        safe_it = str(issuetype).replace('"', '\\"')
+        jql_parts.append(f'issuetype = "{safe_it}"')
+    if sprint and str(sprint).strip():
+        safe_sprint = str(sprint).replace('"', '\\"')
+        jql_parts.append(f'sprint = "{safe_sprint}"')
+
+    jql = " AND ".join(jql_parts) + " ORDER BY created DESC"
 
     jira = JiraUtility(HOST, USERNAME, API_TOKEN)
     try:
-        issues = await jira.get_issues(jql=jql, max_results=max_results)
+        raw = await jira.get_issues(jql=jql, max_results=max_results)
     except Exception as e:
-        # surface upstream errors clearly
         raise HTTPException(status_code=502, detail=f"Failed to query Jira: {e}")
 
-    # If no issues found, return an empty list (frontend can show message)
+    issues = _normalize_jira_issues_payload(raw)
+    logger.info(f"GET /incidents -> Jira returned raw type {type(raw)}, normalized issues: {len(issues)}")
+
     if not issues:
         return []
 
@@ -286,14 +392,101 @@ async def get_incidents(
             "prediction": pred.get("prediction", ""),
             "confidence_score": round(pred.get("confidence", 0.0) * 100, 2),
             "recommendation": pred.get("recommendations", []),
-            # also include sprint if present in Jira payload
             "Sprint": row.get("sprint", "") if "sprint" in row else "",
+            # include raw labels too so dashboard can consume them if needed
+            "labels": (row.get("labels") if "labels" in row else []),
+            "label": row.get("label", "")
         })
     return enriched
 
+@router.get("/incidents/for-scatter")
+async def incidents_for_scatter(
+    max_results: int = Query(1000, description="Max issues to fetch for scatter"),
+    issuetype: Optional[str] = Query("Bug", description="Jira issuetype to query"),
+    sprint: Optional[str] = Query(None, description="Sprint name to filter (exact match)"),
+):
+    """
+    Lightweight endpoint used by Predict.tsx scatter chart.
+    Returns only issues that:
+      - have NO labels (labels array empty and 'label' canonical field empty)
+      - and status is in open-like statuses (Open / In Progress / Reopened)
+    Does NOT perform predictions here — frontend will call predict/bulk as needed.
+    """
+    # build JQL (same base as /incidents)
+    jql_parts = [f"project = '{PROJECT_KEY}'"]
+    if issuetype and str(issuetype).strip():
+        safe_it = str(issuetype).replace('"', '\\"')
+        jql_parts.append(f'issuetype = "{safe_it}"')
+    if sprint and str(sprint).strip():
+        safe_sprint = str(sprint).replace('"', '\\"')
+        jql_parts.append(f'sprint = "{safe_sprint}"')
+
+    jql = " AND ".join(jql_parts) + " ORDER BY created DESC"
+
+    jira = JiraUtility(HOST, USERNAME, API_TOKEN)
+    try:
+        raw = await jira.get_issues(jql=jql, max_results=max_results)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to query Jira for scatter: {e}")
+
+    issues = _normalize_jira_issues_payload(raw)
+    logger.info(f"GET /incidents/for-scatter -> Jira returned raw type {type(raw)}, normalized issues: {len(issues)}")
+
+    # If no issues -> empty list
+    if not issues:
+        return []
+
+    # Build quick map of labels from raw Jira payload (so we don't depend on build_df_from_jira_issues)
+    labels_map = {}
+    for r in issues:
+        key = r.get("key") or (r.get("fields") or {}).get("key") or r.get("id")
+        if not key:
+            continue
+        key = str(key)
+        raw_labels = (r.get("fields") or {}).get("labels", []) or []
+        if isinstance(raw_labels, list):
+            labels_map[key] = raw_labels
+        else:
+            labels_map[key] = [s.strip() for s in str(raw_labels).split(",") if s.strip()] if str(raw_labels).strip() else []
+
+    # We'll reuse build_df_from_jira_issues to get textual fields, sprint, status etc.
+    df = build_df_from_jira_issues(issues, HOST)
+
+    out = []
+    for _, row in df.iterrows():
+        issue_key = str(row.get("issue_key", "") or "")
+        status_val = (row.get("status", "") or "").strip()
+        status_norm = status_val.lower().replace("_", " ").replace("-", " ").strip()
+
+        # 1) status must be open-like
+        if status_norm not in _OPEN_STATUSES:
+            continue
+
+        # 2) labels must be empty (both raw labels and canonical 'label' should be empty)
+        raw_labels = labels_map.get(issue_key, [])
+        canonical_label = (row.get("label", "") or "").strip()
+        if (isinstance(raw_labels, list) and len(raw_labels) > 0) or canonical_label != "":
+            # skip labeled issues
+            continue
+
+        # produce lightweight payload expected by Predict.tsx scatter loader
+        out.append({
+            "issue_key": issue_key,
+            "summary": row.get("summary", "") or "",
+            "ticket_description": row.get("ticket_description", "") or "",
+            "severity": row.get("severity", "") or "",
+            "prediction": "",          # leave empty so frontend can bulk-predict
+            "confidence_score": 0,     # frontend will normalize or fill if needed
+            "url": _host_issue_url(HOST, issue_key) if issue_key else "",
+            "status": status_val,
+            "Sprint": row.get("sprint", "") if "sprint" in row else "",
+        })
+
+    return out
+
 
 @router.get("/dashboard")
-def get_dashboard(start: Optional[str] = Query(None), end: Optional[str] = Query(None), group: str = Query("month"), max_issues: int = Query(2000)):
+async def get_dashboard(start: Optional[str] = Query(None), end: Optional[str] = Query(None), group: str = Query("month"), max_issues: int = Query(2000)):
     """
     Return analytics + full incidents list (for the requested date range).
     start/end optional, ISO dates (YYYY-MM-DD) — default last 12 months.
@@ -311,7 +504,9 @@ def get_dashboard(start: Optional[str] = Query(None), end: Optional[str] = Query
             # If no local dataset, fetch from Jira directly
             jql = f"project = '{PROJECT_KEY}' AND issuetype = Bug ORDER BY created DESC"
             jira = JiraUtility(HOST, USERNAME, API_TOKEN)
-            issues = jira.get_issues(jql=jql, max_results=max_issues)  # NOTE: sync call inside sync endpoint
+            raw = await jira.get_issues(jql=jql, max_results=max_issues)  # NOTE: sync call inside sync endpoint
+            issues = _normalize_jira_issues_payload(raw)
+            logger.info(f"/dashboard fetched {len(issues)} raw issues from Jira")
             if not issues:
                 raise HTTPException(status_code=404, detail="No dataset found locally and Jira returned no issues.")
             df = build_df_from_jira_issues(issues, HOST)
@@ -346,10 +541,14 @@ def get_dashboard(start: Optional[str] = Query(None), end: Optional[str] = Query
         return {"sprints": [], "quarters": [], "incidents": [], "note": "no incidents in date range"}
 
     # prepare series
-    if group == "sprint" and "Sprint" in df.columns:
-        # use Sprint column (don't recompute)
-        sprint_series = df.groupby(df["Sprint"].astype(str)).size().reset_index(name="count")
-        sprint_out = sprint_series.sort_values("Sprint").to_dict(orient="records")
+    if group == "sprint" and ("Sprint" in df.columns or "sprint" in df.columns):
+        # accept both forms; prefer lower-case 'sprint' if present
+        if "sprint" in df.columns:
+            sprint_series = df.groupby(df["sprint"].astype(str)).size().reset_index(name="count")
+            sprint_out = sprint_series.sort_values("sprint").to_dict(orient="records")
+        else:
+            sprint_series = df.groupby(df["Sprint"].astype(str)).size().reset_index(name="count")
+            sprint_out = sprint_series.sort_values("Sprint").to_dict(orient="records")
     else:
         # use month labels
         df["_month"] = df[created_col].dt.to_period("M").astype(str)
@@ -399,7 +598,8 @@ async def train_from_jira(req: TrainJiraRequest):
               ORDER BY created DESC"""
     
     jira = JiraUtility(HOST, USERNAME, API_TOKEN)
-    issues = await jira.get_issues(jql=jql, max_results=req.max_results)
+    raw = await jira.get_issues(jql=jql, max_results=req.max_results)
+    issues = _normalize_jira_issues_payload(raw)
     if not issues:
         raise HTTPException(status_code=404, detail="No Jira issues returned for training.")
     
@@ -472,8 +672,8 @@ LAST_SYNC_PATH = DATA_DIR / "last_sync.json"
 SYNC_TTL_MINUTES = 30  # default caching TTL for GET /sprints (can be tuned)
 
 async def _fetch_issues_from_jira(jira: JiraUtility, jql: str, max_results: int):
-    issues = await jira.get_issues(jql=jql, max_results=max_results)
-    return issues or []
+    raw = await jira.get_issues(jql=jql, max_results=max_results)
+    return _normalize_jira_issues_payload(raw)
 
 @router.post("/sync/jira")
 async def sync_jira(sprint: Optional[str] = None, force: bool = False, max_results: int = 5000):
@@ -535,7 +735,9 @@ async def get_sprints(refresh: bool = Query(False, description="If true, refresh
     # Fallback: fetch from Jira (may be heavier)
     jira = JiraUtility(HOST, USERNAME, API_TOKEN)
     jql = f"project = '{PROJECT_KEY}' AND issuetype = Bug ORDER BY created DESC"
-    issues = await jira.get_issues(jql=jql, max_results=3000)
+    raw = await jira.get_issues(jql=jql, max_results=3000)
+    issues = _normalize_jira_issues_payload(raw)
+    logger.info(f"get_sprints fetched {len(issues)} issues from Jira for sprint discovery")
     if not issues:
         return []
     df = build_df_from_jira_issues(issues, HOST)
@@ -571,7 +773,7 @@ async def get_sprints(refresh: bool = Query(False, description="If true, refresh
                 "n_issues": int(df.shape[0])
             }))
     except Exception as e:
-        print(f"[WARN] corpus merge failed: {e}")
+        logger.warning(f"[WARN] corpus merge failed: {e}")
         pass
 
     return sprints
@@ -640,7 +842,7 @@ async def post_jira_comment(issue_key: str, comment: Dict[str, str] = Body(...))
             return {"ok": True, "data": resp}
     except Exception as e:
         # log and continue to REST fallback (don't fail immediately)
-        print(f"[WARN] JiraUtility comment helper failed: {e}")
+        logger.warning(f"[WARN] JiraUtility comment helper failed: {e}")
 
     # REST fallback using Jira Cloud API
     try:
@@ -724,7 +926,7 @@ async def post_jira_labels(issue_key: str, payload: Dict[str, Any] = Body(...)):
                 await upd
             return {"ok": True, "labels": new_labels}
     except Exception as e:
-        print(f"[WARN] JiraUtility labels helper failed: {e}")
+        logger.warning(f"[WARN] JiraUtility labels helper failed: {e}")
 
     # REST fallback: fetch issue then edit fields.labels using issue edit (PUT)
     try:
@@ -857,9 +1059,36 @@ async def validate_jira():
     jira = JiraUtility(HOST, USERNAME, API_TOKEN)
     jql = f"project = '{PROJECT_KEY}'"
     try:
-        issues = await jira.get_issues(jql=jql, max_results=1)
+        raw = await jira.get_issues(jql=jql, max_results=1)
+        issues = _normalize_jira_issues_payload(raw)
         if issues is None:
             return {"ok": False, "detail": "No response from Jira - check network/host/auth"}
         return {"ok": True, "n_issues": len(issues)}
     except Exception as e:
         return {"ok": False, "detail": str(e)}
+
+@router.get("/debug/jira-sample")
+async def debug_jira_sample(max_results: int = 5):
+    """
+    Debug helper: fetch a small number of Jira issues with the current JQL and return raw payload.
+    Use from Swagger to inspect exactly what Jira returns (which fields contain sprint).
+    """
+    jira = JiraUtility(HOST, USERNAME, API_TOKEN)
+    jql = f"project = '{PROJECT_KEY}' AND issuetype = Bug ORDER BY created DESC"
+    try:
+        raw = await jira.get_issues(jql=jql, max_results=max_results)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Jira fetch failed: {e}")
+    issues = _normalize_jira_issues_payload(raw)
+    if not issues:
+        return {"n_issues": 0, "issues": []}
+    # sample first 3 issues (strip large fields)
+    out = []
+    for raw_issue in issues[:3]:
+        out.append({
+            "key": raw_issue.get("key"),
+            "summary": (raw_issue.get("fields") or {}).get("summary"),
+            "sprint_fields_keys": [k for k in (raw_issue.get("fields") or {}).keys() if "sprint" in str(k).lower()],
+            "fields_sample": {k: (raw_issue.get("fields") or {}).get(k) for k in sorted(list(raw_issue.get("fields") or {}).keys())[:20]}
+        })
+    return {"n_issues": len(issues), "issues_sample": out}

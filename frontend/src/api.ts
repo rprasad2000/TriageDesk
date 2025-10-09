@@ -3,6 +3,19 @@ import axios from "axios";
 const API_URL = import.meta.env.VITE_API_URL || import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8001/api/v1/ml";
 export const api = axios.create({ baseURL: API_URL });
 
+// --- Legacy-path redirect (compatibility) ---
+api.interceptors.request.use(
+  (config) => {
+    if (config && typeof config.url === "string" && config.url.includes("/incidents/for-scatter")) {
+      config.url = config.url.replace("/incidents/for-scatter", "/incidents");
+      // If the old code included query parameters inside the url string, axios will keep them.
+    }
+    return config;
+  },
+  (err) => Promise.reject(err)
+);
+
+
 export type TrainResponse = { message: string; trained: boolean; classes: string[]; n_samples: number; metrics: any };
 export type PredictResponse = { prediction: string; confidence: number; recommendations: any[] };
 
@@ -13,7 +26,12 @@ export const feedback = (text: string, true_label: string, source = "user") => a
 export const retrain = () => api.post<TrainResponse>("/retrain").then(r => r.data);
 
 export const syncBoard = (max_results = 2000) => api.post("/sync/board", { max_results }).then(r => r.data);
-export const getIncidents = (max_results = 2000) => api.get(`/incidents?max_results=${max_results}`).then(r => r.data);
+export const getIncidents = (max_results = 2000) =>
+  api.get("/incidents", { params: { max_results } }).then((r) => r.data);
+
+// Backwards-compatible alias in case code still calls the old `for-scatter` path
+export const getIncidentsForScatter = (max_results = 1000) => getIncidents(max_results);
+
 export const getDashboard = (start?: string, end?: string, group = "month", max_issues = 2000) => {
   const q = new URLSearchParams();
   if (start) q.set("start", start);

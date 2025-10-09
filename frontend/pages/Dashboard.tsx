@@ -1,7 +1,7 @@
 // src/pages/Dashboard.tsx
 import React, { useMemo, useState, useEffect, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, syncBoard, getSprintsLive, getLabelBreakdown   } from "../src/api";
+import { api, syncBoard, getSprintsLive, getLabelBreakdown, getIncidents  } from "../src/api";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, Brush, BarChart, Bar, PieChart, Pie, Cell,
@@ -192,13 +192,11 @@ const handleRefreshBoard = async () => {
     });
 
     // After refresh attempt, fetch fresh incidents (this will read the updated corpus on server)
-    const freshIncidents = await api
-      .get("/incidents", { params: { max_results: 5000 } })
-      .then((r) => r.data)
-      .catch((e) => {
-        console.error("Failed to fetch incidents after sync:", e);
-        return null;
-      });
+   const freshIncidents = await getIncidents(5000).catch((e) => {
+      console.error("Failed to fetch incidents after sync:", e);
+      return null;
+    });
+
 
     if (Array.isArray(freshIncidents)) {
       // update the cached query so UI is updated immediately
@@ -263,7 +261,7 @@ const handleRefreshBoard = async () => {
 
   const { data, isLoading, isError, error, refetch } = useQuery<Incident[]>({
     queryKey: ["incidents", "all"],
-    queryFn: () => api.get("/incidents", { params: { max_results: 5000 } }).then(r => r.data),
+    queryFn: () => getIncidents(5000),
     staleTime: 60_000,
   });
 
@@ -797,15 +795,10 @@ if (isLoading) {
 
 function KpiCard({ title, value }: { title: string; value: number | string }) {
   return (
-    <div style={{
-      background: "#fff",
-      border: "1px solid #e7e7e7",
-      borderRadius: 8,
-      padding: "14px 16px",
-      boxShadow: "0 1px 3px rgba(0,0,0,0.04)",
-    }}>
-      <div style={{ fontSize: 12, color: "#666" }}>{title}</div>
-      <div style={{ fontSize: 26, fontWeight: 700, marginTop: 6 }}>{value}</div>
+    <div className="kpi kpi-card" aria-hidden={false}>
+      <div className="label" style={{ fontSize: 12 }}>{title}</div>
+      <div className="value" style={{ fontSize: 26, marginTop: 6 }}>{value}</div>
     </div>
   );
 }
+

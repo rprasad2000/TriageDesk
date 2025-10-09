@@ -165,6 +165,7 @@ table{width:100%;border-collapse:collapse}
 thead th{background:#fafafa;position:sticky;top:0;z-index:1;padding:8px;text-align:left;border-bottom:1px solid var(--border)}
 tbody td{padding:8px;border-bottom:1px solid #f3f3f3}
 
+
 /* small screen tweaks */
 @media (max-width:640px){
   .container{padding:16px}
@@ -238,34 +239,63 @@ tbody td{padding:8px;border-bottom:1px solid #f3f3f3}
 }
 .btn-jira:hover{ transform: translateY(-2px); box-shadow: 0 8px 18px rgba(45,154,74,0.14); }
 
-/* small Recs button to match Save button style */
-.btn-recs{
-  display:inline-flex;
-  align-items:center;
-  justify-content:center;
-  padding:8px 12px;
-  border-radius:8px;
-  background:#111; /* matches your Save button */
-  color:#fff;
-  border: none;
-  cursor:pointer;
-  font-size:14px;
-  transition: transform .08s ease, box-shadow .12s ease;
-}
-.btn-recs:hover{ transform: translateY(-1px); box-shadow: 0 6px 14px rgba(0,0,0,0.08) }
-.btn-recs:active{ transform: translateY(0) }
-.btn-recs[disabled]{ opacity:0.6; cursor:not-allowed }
+/* ---------- Make .btn-recs match the same smooth gradient style as .btn-dark / nav pills ---------- */
+/* Paste this at the end of style.css to ensure it takes precedence */
 
-/* Solid black utility button (legacy style) */
-.btn-dark {
-  background:#111;
-  color:#fff;
-  border:none;
+.btn-recs {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  font-weight: 700;
+  font-size: 14px;
+  color: #ffffff; /* white text */
+  text-decoration: none;
+  border: 1px solid rgba(0,0,0,0.12);
+  background: linear-gradient(135deg, #2a5d8f 0%, #1f3b57 100%);
+  box-shadow: 0 6px 14px rgba(0,0,0,0.12);
+  cursor: pointer;
+  transition: transform .18s ease, box-shadow .18s ease, filter .18s ease, background .18s ease;
+  line-height: 1;
 }
-.btn-dark:hover:not([disabled]){
-  transform:translateY(-1px);
-  box-shadow: var(--shadow-sm);
+
+/* pill variant if used */
+.btn-recs.btn-pill { border-radius: 999px; padding: 8px 14px; }
+
+/* Hover / focus */
+.btn-recs:hover,
+.btn-recs:focus {
+  transform: translateY(-3px);
+  box-shadow: 0 12px 30px rgba(0,0,0,0.18);
+  filter: brightness(1.03);
+  outline: none;
 }
+
+/* Active (pressed) */
+.btn-recs:active {
+  transform: translateY(0);
+  box-shadow: inset 0 4px 14px rgba(0,0,0,0.28);
+}
+
+/* Disabled */
+.btn-recs[disabled], .btn-recs.disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+  filter: none;
+}
+
+/* Focus-visible for accessibility */
+.btn-recs:focus-visible {
+  outline: 3px solid rgba(255,255,255,0.08);
+  outline-offset: 2px;
+}
+
+
+
 
 /* Always-yellow pulsing button */
 .btn-warning {
@@ -344,6 +374,63 @@ tbody td{padding:8px;border-bottom:1px solid #f3f3f3}
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.6);
 }
 
+/* ---------- App hero / header (full width) ---------- */
+.app-hero {
+  width: 100%;
+  background: #27547F; /* theme color */
+  box-sizing: border-box;
+  position: relative;
+  padding: 12px 0;
+}
+
+/* thin darker strips top & bottom (visual from reference) */
+.app-hero::before,
+.app-hero::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 10px;
+  background: #1f425e; /* slightly darker accent */
+}
+.app-hero::before { top: 0; }
+.app-hero::after { bottom: 0; }
+
+/* inner container keeps existing container width and centers content */
+.app-hero .container {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  /* no background here — keep hero color visible */
+}
+
+/* title */
+.app-hero h1 {
+  margin: 0;
+  color: #ffffff;
+  font-weight: 700;
+  font-size: 1.9rem;
+  letter-spacing: -0.2px;
+  text-shadow: 0 1px 0 rgba(0,0,0,0.08);
+}
+
+/* nav area */
+.app-hero nav { display: flex; gap: 14px; align-items: center; }
+
+/* ---------- KPI card tweak: requested background ---------- */
+.kpi, .kpi-card {
+  background: #f3f4f6; /* requested */
+  border-radius: 12px;
+  border: 1px solid #e6e8eb;
+  padding: 12px;
+  color: var(--text);
+  box-shadow: none;
+}
+.kpi .label, .kpi-card .label { color: var(--muted); font-weight: 600; }
+.kpi .value, .kpi-card .value { color: var(--text); font-weight: 700; font-size: 22px; }
+
 /* animations */
 @keyframes rotate-360 {
   to { transform: rotate(360deg); }
@@ -369,4 +456,350 @@ tbody td{padding:8px;border-bottom:1px solid #f3f3f3}
   background: rgba(0,0,0,0.18);
   border-radius: 6px;
 }
+ /* ---------- Page-wide background ---------- */
+ /* Make entire app background use the requested theme color */
+ html, body {
+   height: 100%;
+   margin: 0;
+   padding: 0;
+   background: #27547F;   /* page background as requested */
+   color: #172B4D;
+   -webkit-font-smoothing:antialiased;
+   box-sizing: border-box;
+ }
 
+ /* Keep container as a white panel so content remains readable */
+ .container {
+   background: #fff;      /* central area remains white for readability */
+   max-width: 1600px;
+   margin: 24px auto;
+   padding: 24px 36px;
+   border-radius: 6px;
+   box-shadow: 0 8px 24px rgba(16,24,40,0.06);
+   box-sizing: border-box;
+ }
+
+ /* If you use container-fluid as top-level wrapper, keep it full width */
+ .container-fluid {
+   width: 100%;
+   box-sizing: border-box;
+   background: transparent; /* the page background shows through */
+ }
+
+ /* ---------- App hero / header (full-bleed inside white container) ---------- */
+ .app-hero {
+   width: 100%;
+   background: transparent; /* keep the hero visually inside the white container */
+   padding: 0;
+ }
+
+ /* If you want a full-bleed band behind header (edge-to-edge blue), use .app-hero-full */
+ .app-hero-full {
+   width: 100%;
+   background: #27547F;       /* full-bleed band color */
+   padding: 12px 0;
+   box-sizing: border-box;
+ }
+
+ /* header inner container with white panel removed so band is visible */
+ .app-hero-full .container { background: transparent; padding: 8px 36px; }
+
+ /* Title in header */
+ .app-hero h1, .app-hero-full h1 {
+   margin: 0;
+   color: #ffffff;
+   font-weight: 700;
+   font-size: 1.9rem;
+   text-shadow: 0 1px 0 rgba(0,0,0,0.08);
+ }
+
+
+ /* Base pill: white by default */
+ .nav-pill {
+   display: inline-flex;
+   align-items: center;
+   justify-content: center;
+   padding: .5rem 1rem;
+   border-radius: 10px;
+   font-weight: 600;
+   font-size: 15px;
+   color: #163249;
+   text-decoration: none;
+   background: #fff;
+   border: 1px solid transparent;
+   box-shadow: 0 4px 10px rgba(0,0,0,0.08);
+   transition: all .25s ease;
+ }
+
+ /* Remove the ::before overlay completely to avoid stripes */
+ .nav-pill::before { display: none !important; }
+
+ /* Smooth gradient on hover */
+ .nav-pill:hover,
+ .nav-pill:focus {
+   background: linear-gradient(135deg, #2a5d8f 0%, #1f3b57 100%);
+   color: #fff;
+   transform: translateY(-2px);
+   box-shadow: 0 8px 18px rgba(0,0,0,0.15);
+ }
+
+ /* Active pill (current page) */
+ .nav-pill.active {
+   background: linear-gradient(135deg, #2a5d8f 0%, #1f3b57 100%);
+   color: #fff !important;
+   box-shadow: inset 0 2px 6px rgba(0,0,0,0.3);
+ }
+
+
+ /* Small-screen tweak */
+ @media (max-width:700px){
+   .nav-pill { padding: .36rem .6rem; font-size: 14px; border-radius: 8px; }
+ }
+
+
+ /* ---------- KPI cards background (requested) ---------- */
+ .kpi, .kpi-card {
+   background: #f3f4f6; /* requested */
+   border-radius: 12px;
+   border: 1px solid #e6e8eb;
+   padding: 12px;
+   color: var(--text);
+   box-shadow: none;
+ }
+ .kpi .label, .kpi-card .label { color: var(--muted); font-weight: 600; }
+ .kpi .value, .kpi-card .value { color: var(--text); font-weight: 700; font-size: 22px; }
+
+
+/* ================== Predict table compacting & column control ==================
+   (Appended block: safe, focused changes to reduce horizontal scroll and make
+   action buttons uniform in size. Only styling — no JS/behavior changes.)
+   ===========================================================================*/
+
+/* Use fixed layout so explicit column widths are respected */
+.predict-table {
+  table-layout: fixed;
+  width: 100%;
+  border-collapse: collapse;
+}
+
+/* Base cell styling for predict table */
+.predict-table th,
+.predict-table td {
+  padding: 8px;
+  vertical-align: middle;
+  font-size: 14px;
+  box-sizing: border-box;
+}
+
+/* Header little emphasis */
+.predict-table thead th {
+  background: #fafafa;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+/* Summary column: allow multi-line wrap, break long words, limit width */
+.predict-table td.summary,
+.predict-table th.summary {
+  min-width: 140px;
+  max-width: 220px;
+  white-space: normal; /* allow wrapping */
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
+  overflow: hidden;
+}
+
+/* Narrower numeric/category columns so they don't hog space */
+.predict-table td,
+.predict-table th {
+  /* default fallback; specific widths applied inline in React markup */
+}
+
+/* Standard widths we expect the React markup to use (these match the rendered layout) */
+.predict-table th.issue { width: 90px; }
+.predict-table th.status { width: 100px; }
+.predict-table th.severity { width: 80px; }
+.predict-table th.prediction { width: 80px; }
+.predict-table th.conf { width: 70px; }
+.predict-table th.actions { width: 320px; }
+
+/* Make the Issue link look consistent */
+.predict-table td a {
+  color: inherit;
+  text-decoration: underline;
+  font-weight: 600;
+}
+
+/* Actions cell: make contents inline, compact and non-wrapping */
+.predict-table td.actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: nowrap;
+  overflow: visible;
+}
+
+/* Compact action controls (uniform sizing) */
+.predict-table .actions .btn,
+.predict-table .actions .btn-primary,
+.predict-table .actions .btn-dark,
+.predict-table .actions .btn-pill,
+.predict-table .actions .update-jira,
+.predict-table .actions .view-similar {
+  padding: 6px 10px;
+  font-size: 13px;
+  border-radius: 8px;
+  min-width: 0;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+}
+
+/* Slightly stronger primary footprint but still compact */
+.predict-table .actions .btn-primary {
+  padding: 6px 12px;
+}
+
+/* Inputs inside actions adjusted */
+.predict-table .actions input[type="text"],
+.predict-table .actions input[type="number"],
+.predict-table .actions input {
+  padding: 6px 8px;
+  height: 36px;
+  font-size: 13px;
+  border-radius: 8px;
+  box-sizing: border-box;
+}
+
+/* Ensure Update Jira / View similar don't overflow text and match size */
+.predict-table .actions .update-jira,
+.predict-table .actions .view-similar {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 110px; /* keeps these buttons similar in visual width */
+}
+
+/* Optional: reduce spacing when viewport is narrow to avoid overflow */
+@media (max-width: 1100px) {
+  .predict-table .actions { gap: 6px; }
+  .predict-table .actions .btn,
+  .predict-table .actions input { height: 34px; font-size: 13px; padding: 5px 8px; }
+  .predict-table th.summary, .predict-table td.summary { max-width: 180px; min-width: 120px; }
+}
+
+/* Very small screens: allow table to scroll horizontally but keep controls usable */
+@media (max-width: 700px) {
+  .predict-table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: nowrap; }
+  .predict-table td, .predict-table th { white-space: nowrap; }
+  .predict-table .actions { gap: 6px; }
+}
+
+/* Accessibility: focus ring for inline buttons */
+.predict-table .actions .btn:focus-visible,
+.predict-table .actions .btn-primary:focus-visible,
+.predict-table .actions .btn-dark:focus-visible {
+  outline: 3px solid rgba(3,102,214,0.14);
+  outline-offset: 2px;
+}
+
+/* ---------- Make all .btn-dark use smooth diagonal gradient like header pills ---------- */
+/* Place at the end of style.css to override earlier definitions */
+
+.btn-dark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-weight: 700;
+  font-size: 14px;
+  color: #ffffff; /* white text */
+  text-decoration: none;
+  border: 1px solid rgba(0,0,0,0.12);
+  /* smooth diagonal gradient (matches your theme) */
+  background: linear-gradient(135deg, #2a5d8f 0%, #1f3b57 100%);
+  box-shadow: 0 6px 14px rgba(0,0,0,0.12);
+  cursor: pointer;
+  transition: transform .18s ease, box-shadow .18s ease, filter .18s ease, background .18s ease;
+  line-height: 1;
+}
+
+/* pill variant keeps rounder corners */
+.btn-dark.btn-pill { border-radius: 999px; padding: 8px 14px; }
+
+/* Hover: raise + slightly brighter / darker shadow for depth */
+.btn-dark:hover,
+.btn-dark:focus {
+  transform: translateY(-3px);
+  box-shadow: 0 12px 30px rgba(0,0,0,0.18);
+  filter: brightness(1.03);
+  outline: none;
+}
+
+/* Active / pressed: subtle inset to indicate press */
+.btn-dark:active {
+  transform: translateY(0);
+  box-shadow: inset 0 4px 14px rgba(0,0,0,0.28);
+}
+
+/* Disabled: preserve size but remove interaction/shine */
+.btn-dark[disabled], .btn-dark.disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+  filter: none;
+}
+
+/* Smaller variant tweak (if used) */
+.btn-dark.small {
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
+/* Ensure links styled as .btn-dark look same */
+a.btn-dark { display: inline-flex; }
+
+/* Focus visible for accessibility */
+.btn-dark:focus-visible {
+  outline: 3px solid rgba(255,255,255,0.08);
+  outline-offset: 2px;
+}
+
+
+/* End appended predict-table block */
+/* scatter dot pulse for unlabeled */
+@keyframes scatter-pulse {
+  0% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.12); opacity: 0.78; }
+  100% { transform: scale(1); opacity: 1; }
+}
+.scatter-dot-unlabeled {
+  animation: scatter-pulse 1.6s ease-in-out infinite;
+  transform-origin: center center;
+}
+
+/* respect user's reduced motion preference */
+@media (prefers-reduced-motion: reduce) {
+  .scatter-dot-unlabeled { animation: none !important; }
+}
+
+/* Predict chart — make scatter points stable (disable accidental "blinking" animations) */
+.scatter-dot,
+.scatter-dot-unlabeled {
+  animation: none !important;      /* stop keyframe animations */
+  transition: transform 120ms linear, opacity 120ms linear; /* gentle micro-transition only */
+  transform-origin: center center;
+}
+
+/* ensure svg circles don't cause overflow visuals */
+.recharts-wrapper svg {
+  overflow: visible; /* leave this if you rely on Recharts internal clipping; we already added overflow hidden to wrapper */
+}

@@ -32,6 +32,276 @@ type IssueRow = {
   Sprint?: string;
 };
 
+// ---------- improved interactive SVG scatter (replace previous ScatterSVG) ----------
+type ScatterSVGProps = {
+  width: number;
+  height: number;
+  points: {
+    issue_key: string;
+    summary: string;
+    ticket_description: string;
+    severity: string;
+    prediction: string;
+    confidence: number; // 0..100
+    url?: string;
+  }[];
+  categories: string[];
+};
+
+function ScatterSVG({ width, height, points, categories }: ScatterSVGProps) {
+  const padLeft = 120;
+  const padRight = 40;
+  const padTop = 16;
+  const padBottom = 34;
+  const plotW = width - padLeft - padRight;
+  const plotH = height - padTop - padBottom;
+  const wrapperRef = React.useRef<HTMLDivElement | null>(null);
+
+  const catIndex = (sev: string) => Math.max(0, Math.min(categories.length - 1, categories.indexOf(sev)));
+  const xFor = (conf: number) => padLeft + (Math.max(0, Math.min(100, conf)) / 100) * plotW;
+  const yFor = (idx: number) => padTop + (idx + 0.5) * (plotH / categories.length);
+
+  // tooltip state (sticky = hold until closed)
+  const [tip, setTip] = React.useState<null | {
+    pageX: number;
+    pageY: number;
+    issue_key: string;
+    url?: string;
+    prediction: string;
+    severity: string;
+    confidence: number;
+    summary: string;
+    sticky?: boolean;
+  }>(null);
+
+  // close helper
+  const closeTip = () => setTip(null);
+
+  // click outside to close: register once when tip present
+  React.useEffect(() => {
+    if (!tip) return;
+    const handler = (ev: MouseEvent) => {
+      const tgt = ev.target as HTMLElement;
+      // if user clicked inside the floating tooltip (anchor), do nothing
+      // We'll use data-attr on the tooltip container (see below) to detect clicks inside
+      if (tgt && (tgt.closest && tgt.closest("[data-scatter-tooltip]"))) return;
+      // else close
+      setTip(null);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [tip]);
+
+    // auto-close tooltip when mouse leaves both chart area AND tooltip (but only when not sticky)
+  React.useEffect(() => {
+    if (!tip) return; // nothing to watch
+    const onMove = (ev: MouseEvent) => {
+      try {
+        const wr = wrapperRef.current;
+        const tooltipEl = document.querySelector<HTMLElement>("[data-scatter-tooltip]");
+
+        // get bounding rects
+        const wrRect = wr?.getBoundingClientRect();
+        const ttRect = tooltipEl?.getBoundingClientRect();
+
+        const insideWrapper = wrRect
+          ? ev.clientX >= wrRect.left && ev.clientX <= wrRect.right && ev.clientY >= wrRect.top && ev.clientY <= wrRect.bottom
+          : false;
+        const insideTooltip = ttRect
+          ? ev.clientX >= ttRect.left && ev.clientX <= ttRect.right && ev.clientY >= ttRect.top && ev.clientY <= ttRect.bottom
+          : false;
+
+        // if pointer is outside both and tooltip is not sticky → close
+        if (!insideWrapper && !insideTooltip && !tip.sticky) {
+          setTip(null);
+        }
+      } catch (e) {
+        // defensive: ignore any DOM exceptions
+        // console.warn("scatter auto-close error", e);
+      }
+    };
+
+    document.addEventListener("mousemove", onMove, { passive: true });
+    return () => document.removeEventListener("mousemove", onMove);
+  }, [tip]);
+
+    React.useEffect(() => {
+    if (!tip) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setTip(null); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [tip]);
+
+
+  return (
+    <div ref={wrapperRef} style={{ width: "100%", overflow: "hidden", position: "relative" }}>
+      <svg width="100%" viewBox={`0 0 ${width} ${height}`} style={{ display: "block", maxWidth: "100%" }}>
+        {/* X grid & ticks */}
+        {[0, 25, 50, 75, 100].map((v) => (
+          <g key={`xtick-${v}`}>
+            <line
+              x1={padLeft + (v / 100) * plotW}
+              x2={padLeft + (v / 100) * plotW}
+              y1={padTop}
+              y2={padTop + plotH}
+              stroke="#f1f1f1"
+            />
+            <text x={padLeft + (v / 100) * plotW} y={padTop + plotH + 20} textAnchor="middle" fontSize={11} fill="#444">
+              {v}%
+            </text>
+          </g>
+        ))}
+
+        {/* Y labels */}
+        {categories.map((c, i) => (
+          <text key={`y-${c}`} x={12} y={yFor(i) + 4} fontSize={13} fill="#333">{c}</text>
+        ))}
+
+        {/* X axis label */}
+        <text x={padLeft + plotW / 2} y={height - 6} fontSize={12} fill="#333" textAnchor="middle">
+          Unlabeled (Predicted)
+        </text>
+
+        {/* points */}
+        {points.map((p, i) => {
+          const xi = xFor(p.confidence || 0);
+          const yi = yFor(catIndex(p.severity));
+          return (
+            <g key={p.issue_key || i}>
+              <circle
+                cx={xi}
+                cy={yi}
+                r={6}
+                fill="#1f77b4"
+                stroke="#0b5d9d"
+                strokeWidth={1}
+                style={{ cursor: "pointer" }}
+                onMouseEnter={(e) => {
+                  // show tooltip anchored near mouse pointer (client coords)
+                  const me = e as React.MouseEvent<SVGCircleElement>;
+                  setTip({
+                    pageX: me.clientX,
+                    pageY: me.clientY,
+                    issue_key: p.issue_key,
+                    url: p.url,
+                    prediction: p.prediction || "N/A",
+                    severity: p.severity || "N/A",
+                    confidence: Number(p.confidence) || 0,
+                    summary: (p.summary || "").slice(0, 300),
+                    sticky: false
+                  });
+                }}
+                // DO NOT navigate on dot click. Instead make tooltip sticky so user can click inside it.
+                onClick={() => {
+                  setTip((t) => {
+                    if (t && t.issue_key === p.issue_key) {
+                      // toggle sticky if same issue currently shown
+                      return { ...t, sticky: !t.sticky };
+                    }
+                    // else make this sticky
+                    return {
+                      pageX: window.innerWidth / 2,
+                      pageY: window.innerHeight / 2,
+                      issue_key: p.issue_key,
+                      url: p.url,
+                      prediction: p.prediction || "N/A",
+                      severity: p.severity || "N/A",
+                      confidence: Number(p.confidence) || 0,
+                      summary: (p.summary || "").slice(0, 300),
+                      sticky: true
+                    };
+                  });
+                }}
+              />
+            </g>
+          );
+        })}
+      </svg>
+
+      {/* tooltip overlay (interactive) */}
+      {tip && (
+        <div
+          data-scatter-tooltip
+          style={{
+            position: "fixed",
+            left: Math.min(Math.max(8, tip.pageX + 12), window.innerWidth - 380),
+            top: Math.max(8, tip.pageY - 8),
+            zIndex: 9999,
+            background: "white",
+            border: "1px solid rgba(0,0,0,0.12)",
+            padding: 10,
+            borderRadius: 6,
+            boxShadow: "0 6px 18px rgba(0,0,0,0.08)",
+            maxWidth: 360,
+            pointerEvents: "auto"
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div style={{ fontWeight: 700 }}>{tip.issue_key}</div>
+            <button
+              title="Close"
+              onClick={() => closeTip()}
+              style={{
+                border: "none",
+                background: "transparent",
+                fontSize: 16,
+                cursor: "pointer",
+                lineHeight: 1,
+                padding: 4
+              }}
+            >
+              ×
+            </button>
+          </div>
+
+          <div style={{ marginTop: 6, fontSize: 13 }}>
+            <div><b>Pred:</b> {tip.prediction || "N/A"}</div>
+            <div><b>Severity:</b> {tip.severity || "N/A"}</div>
+            <div><b>Conf:</b> {Number(tip.confidence).toFixed(2)}%</div>
+            <div style={{ marginTop: 8, color: "#333" }}>{tip.summary}</div>
+          </div>
+
+          <div style={{ marginTop: 10, display: "flex", gap: 8 }}>
+            {tip.url ? (
+              <a
+                href={tip.url}
+                target="_blank"
+                rel="noreferrer"
+                style={{
+                  display: "inline-block",
+                  padding: "6px 10px",
+                  borderRadius: 6,
+                  background: "#0b5d9d",
+                  color: "white",
+                  textDecoration: "none",
+                  fontSize: 13
+                }}
+              >
+                Open ticket
+              </a>
+            ) : null}
+
+            <button
+              onClick={() => closeTip()}
+              style={{
+                display: "inline-block",
+                padding: "6px 10px",
+                borderRadius: 6,
+                background: "#eee",
+                border: "1px solid #ddd",
+                fontSize: 13
+              }}
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 export default function Predict() {
   // Single-text quick classify (existing)
   const [text, setText] = useState<string>(
@@ -368,18 +638,12 @@ export default function Predict() {
     } finally {
       setSyncing(false);
       syncInProgressRef.current = false;
+      // <-- ADD THIS LINE to refresh scatter after sync completes
+      setScatterRefreshCounter((c) => c + 1);
     }
   };
 
-//   const handlePostJiraComment = async (issueKey: string, prediction?: string) => {
-//   if (!issueKey) return showMessage("Invalid issue key");
-//   // if you want prediction included, require it
-//   if (!prediction) return showMessage("No prediction available — run prediction first.");
-//   const comment = `This is an automated message.\nDetected Issue: ${prediction}.\nKindly reach out to ${prediction} team.`;
-//   const ok = await showConfirm(`Post the following comment to ${issueKey}?\n\n${comment}`);
-//   if (!ok) return;
-//   postCommentMut.mutate({ issueKey, comment });
-// };
+
 
 // open dialog when user clicks Update Jira button
 const openUpdateDialog = (issueKey: string, prediction?: string) => {
@@ -631,11 +895,374 @@ const [updateCommentText, setUpdateCommentText] = useState<string>("");
   const singlePredLoading = singlePred.status === "pending";
   const bulkPredictLoading = bulkPredictMut.status === "pending";
   const bulkFeedbackLoading = bulkFeedbackMut.status === "pending";
+  
+  // --- Scatter chart state & helpers (INSERT after existing state declarations) ---
+const SEVERITY_CATEGORIES = ["Blocker", "Major", "Minor", "Critical"];
 
-  return (
-    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-      {/* Left: free-text classifier */}
-      <div className="card">
+const [scatterPoints, setScatterPoints] = useState<
+  {
+    issue_key: string;
+    summary: string;
+    ticket_description: string;
+    severity: string;
+    prediction: string;
+    confidence: number; // 0..100 percent
+    url?: string;
+  }[]
+>([]);
+
+const [chartLoading, setChartLoading] = useState(false);
+// bump this to force re-fetch (we'll increment after Jira sync finishes)
+const [scatterRefreshCounter, setScatterRefreshCounter] = useState(0);
+
+// Fetch lightweight data for scatter. Dependent only on selectedSprint or manual refresh.
+  useEffect(() => {
+  let mounted = true;
+  const load = async () => {
+    setChartLoading(true);
+    try {
+      const params: any = { max_results: 1000 };
+      if (selectedSprint) params.sprint = selectedSprint;
+      // NOTE: backend mapping might route /incidents/for-scatter -> /incidents;
+      // we still call the same endpoint and apply client-side filters to be safe.
+      const resp = await api.get("/incidents/for-scatter", { params });
+      const data = Array.isArray(resp?.data) ? resp.data : [];
+      if (!mounted) return;
+
+      // ---------- helpers: robust extraction ----------
+      const OPEN_STATUSES = new Set([
+        "open",
+        "in progress",
+        "inprogress",
+        "reopened",
+        "re-opened",
+        "reopen",
+        "re-open",
+        "triage",
+        // add other tenant-specific names here if needed
+      ]);
+
+      const extractLabels = (it: any): string[] => {
+        // try multiple common shapes
+        try {
+          // canonical single label field
+          if (it.label && String(it.label).trim()) {
+            return [String(it.label).trim()];
+          }
+          // array of labels
+          if (Array.isArray(it.labels) && it.labels.length) {
+            return it.labels.map((x: any) => String(x || "").trim()).filter(Boolean);
+          }
+          // Jira raw fields container
+          if (it.fields && Array.isArray(it.fields.labels) && it.fields.labels.length) {
+            return it.fields.labels.map((x: any) => String(x || "").trim()).filter(Boolean);
+          }
+          // sometimes labels come as comma/pipe/semicolon separated string
+          const cand = it.labels ?? it.label ?? it.labels_str ?? it.raw_labels ?? "";
+          if (typeof cand === "string" && cand.trim()) {
+            return cand.split(/[;,|]+/).map((s: string) => s.trim()).filter(Boolean);
+          }
+        } catch (e) {
+          // ignore
+        }
+        return [];
+      };
+
+      const extractStatus = (it: any): string => {
+        try {
+          let s: any = it.status ?? it.Status ?? (it.fields && it.fields.status) ?? "";
+          if (!s) return "";
+          if (typeof s === "string") return s.trim();
+          if (typeof s === "object") {
+            // common keys
+            return String(s.name || s.displayName || s.status || "").trim();
+          }
+          return String(s).trim();
+        } catch (e) {
+          return "";
+        }
+      };
+
+      // ---------- normalize into points ----------
+      let pts = data.map((it: any) => {
+        const issue_key = (it.issue_key || it.incident_no || it.key || it.issueKey || "").toString();
+        const summary = String(it.summary || it.brief_detail || it.title || "").slice(0, 300);
+        const ticket_description = String(it.ticket_description || it.description || summary).slice(0, 500);
+        const severity = String(it.severity ?? it.Severity ?? "").trim();
+
+        const rawPred = it.prediction ?? it.predicted ?? it.pred_label ?? it.pred ?? "";
+        const prediction = String(rawPred ?? "").trim();
+
+        let confidence = Number(it.confidence_score ?? it.confidence ?? it.confidence_pct ?? 0);
+        if (!Number.isFinite(confidence)) confidence = 0;
+        if (confidence > 0 && confidence <= 1) confidence = confidence * 100;
+        confidence = Math.max(0, Math.min(100, confidence));
+
+        const url = it.url || (issue_key ? `${JIRA_HOST}/browse/${issue_key}` : "");
+        const status = extractStatus(it);
+        const status_norm = String(status).toLowerCase().replace(/[_-]+/g, " ").trim();
+
+        const labels = extractLabels(it); // array
+
+        return {
+          raw: it,
+          issue_key,
+          summary,
+          ticket_description,
+          severity,
+          prediction,
+          confidence,
+          url,
+          status,
+          status_norm,
+          labels,
+        };
+      });
+
+      // ---------- Filter: keep only open statuses AND label-empty issues ----------
+      pts = pts.filter((p: any) => {
+        // must belong to our severity buckets (optional, keeps chart tidy)
+        if (!SEVERITY_CATEGORIES.includes(p.severity)) return false;
+
+        // status must be open-like
+        if (!p.status_norm || !OPEN_STATUSES.has(p.status_norm)) return false;
+
+        // labels must be empty (no labels in array and no canonical label)
+        if (Array.isArray(p.labels) && p.labels.length > 0) return false;
+        // also check canonical 'label' or 'label' inside raw payload
+        const canonicalLabel = String((p.raw && (p.raw.label ?? p.raw.pred_label ?? "")) || "").trim();
+        if (canonicalLabel) return false;
+
+        return true;
+      });
+
+      // ---------- If some points have no prediction, request bulk predict and merge ----------
+      const needPredKeys = pts
+        .filter((p: any) => !p.prediction || p.prediction === "" || p.prediction === "N/A")
+        .map((p: any) => p.issue_key)
+        .filter(Boolean);
+
+      if (needPredKeys.length > 0) {
+        try {
+          const bulkResp = await api.post("/predict/bulk", { issue_keys: needPredKeys, top_k: 1 });
+          const preds = Array.isArray(bulkResp?.data?.predictions) ? bulkResp.data.predictions : [];
+
+          const byKey = new Map<string, any>();
+          for (const r of preds) {
+            const k = r.issue_key || r.issueKey || r.key;
+            let conf = Number(r.confidence ?? r.confidence_score ?? 0);
+            if (!Number.isFinite(conf)) conf = 0;
+            if (conf > 0 && conf <= 1) conf = conf * 100;
+            conf = Math.max(0, Math.min(100, conf));
+            byKey.set(k, { prediction: String(r.prediction ?? r.label ?? r.pred ?? "").trim(), confidence: conf });
+          }
+
+          pts = pts.map((p: any) => {
+            if ((!p.prediction || p.prediction === "" || p.prediction === "N/A") && byKey.has(p.issue_key)) {
+              const nw = byKey.get(p.issue_key);
+              return {
+                ...p,
+                prediction: nw.prediction || "N/A",
+                confidence: typeof nw.confidence === "number" ? nw.confidence : p.confidence,
+              };
+            }
+            return p;
+          });
+        } catch (err) {
+          console.warn("Bulk predict failed for scatter points:", err);
+        }
+      }
+
+      // final mapping to shape expected by ScatterSVG (strip extras)
+      const finalPts = pts.map((p: any) => ({
+        issue_key: p.issue_key,
+        summary: p.summary,
+        ticket_description: p.ticket_description,
+        severity: p.severity,
+        prediction: p.prediction,
+        confidence: Number(p.confidence) || 0,
+        url: p.url,
+      }));
+
+      if (mounted) setScatterPoints(finalPts);
+    } catch (e) {
+      console.error("Failed to load scatter data", e);
+      if (mounted) setScatterPoints([]);
+    } finally {
+      if (mounted) setChartLoading(false);
+    }
+  };
+
+  load();
+  return () => {
+    mounted = false;
+  };
+}, [selectedSprint, scatterRefreshCounter]);
+
+
+    return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16, alignItems: "stretch" }}>
+      {/* -------- Scatter chart: Unlabeled (Predicted) — by Severity -------- */}
+<div className="card" style={{ width: "100%", minWidth: 0, marginBottom: 28 }}>
+  <h2>Unlabeled (Predicted) — by Severity</h2>
+
+  <div style={{ position: "relative", padding: 12 }}>
+    {chartLoading ? (
+      <div style={{ padding: 28, textAlign: "right", color: "#666" }}>loading...</div>
+    ) : scatterPoints.length === 0 ? (
+      <div style={{ padding: 18, color: "#666" }}>No unlabeled open issues found for selected sprint.</div>
+    ) : (
+      <div style={{ width: "100%", height: 260, boxSizing: "border-box", borderTop: "1px solid #f3f3f3", overflow: "hidden" }}>
+        <ScatterSVG
+          width={1000}
+          height={260}
+          points={scatterPoints}
+          categories={SEVERITY_CATEGORIES}
+        />
+      </div>
+    )}
+  </div>
+</div>
+
+      
+
+      {/* Top: Sprint-driven prediction UI (full width) */}
+      <div className="card" style={{ width: "100%", minWidth: 0 }}>
+        <h2>Predict (Sprint)</h2>
+
+        <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
+          <label style={{ marginRight: 6 }}>Sprint:</label>
+          <select value={selectedSprint} onChange={(e) => setSelectedSprint(e.target.value)} disabled={syncing || sprintsLoading}>
+            <option value="">-- select sprint --</option>
+            {sprints.map((s: string) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+
+          <button
+            onClick={handleRefreshFromJira}
+            disabled={syncing}
+            className={`btn btn-warning btn-pill`}
+            title="Fetch latest sprints & issues from Jira"
+          >
+            {syncing ? (<><span className="spinner" /> Syncing…</>) : ("Refresh from Jira")}
+          </button>
+
+          <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+            <button className="btn btn-dark" onClick={() => selectAllVisible(true)}>Select all</button>
+            <button className="btn btn-dark" onClick={() => selectAllVisible(false)}>Clear</button>
+            <button className="btn btn-dark" onClick={handlePredictSelected} disabled={bulkPredictLoading || selectedKeys.length === 0}>
+              {bulkPredictLoading ? "Predicting…" : `Predict selected (${selectedKeys.length})`}
+            </button>
+            <button className="btn btn-dark" onClick={handlePredictAllVisible} disabled={bulkPredictLoading || issues.length === 0}>
+              {bulkPredictLoading ? "Predicting…" : "Predict all visible"}
+            </button>
+          </div>
+        </div>
+
+        <div style={{ maxHeight: 420, overflow: "auto", borderTop: "1px solid #eee", paddingTop: 8 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed" }}>
+  <thead style={{ background: "#fafafa", position: "sticky", top: 0, zIndex: 2 }}>
+    <tr>
+      <th style={{ padding: 6, width: 36 }}></th>
+      <th style={{ padding: 6, width: 90, whiteSpace: "nowrap" }}>Issue</th>
+      <th style={{ padding: 6, minWidth: 260, maxWidth: 520 }}>Summary</th>
+      <th style={{ padding: 6, width: 100, whiteSpace: "nowrap" }}>Status</th>
+      <th style={{ padding: 6, width: 110, whiteSpace: "nowrap" }}>Severity</th>
+      <th style={{ padding: 6, width: 110, whiteSpace: "nowrap" }}>Prediction</th>
+      <th style={{ padding: 6, width: 90, whiteSpace: "nowrap" }}>Conf.</th>
+      <th style={{ padding: 6, width: 360, whiteSpace: "nowrap" }}>Actions</th>
+    </tr>
+  </thead>
+
+  <tbody>
+    {issues.map((it, idx) => {
+      const isUpdating = !!updatingMap[it.issue_key ?? ""];
+      return (
+        <tr key={it.issue_key || idx} style={{ borderBottom: "1px solid #f3f3f3" }}>
+          <td style={{ padding: 6, width: 36 }}>
+            <input type="checkbox" checked={!!selectedMap[it.issue_key]} onChange={() => toggleSelect(it.issue_key)} />
+          </td>
+
+          {/* Issue cell — now a link to Jira */}
+          <td style={{ padding: 6, width: 90, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+            {it.issue_key ? (
+              <a
+                href={`${JIRA_HOST}/browse/${it.issue_key}`}
+                target="_blank"
+                rel="noreferrer"
+                style={{ color: "inherit", textDecoration: "underline", fontWeight: 600 }}
+                title={`Open ${it.issue_key} in Jira`}
+              >
+                {it.issue_key}
+              </a>
+            ) : (
+              "-"
+            )}
+          </td>
+
+          {/* Summary — allow wrapping but limit width */}
+          <td style={{ padding: 6, minWidth: 260, maxWidth: 520, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "normal" }}>
+            {it.summary || it.brief_detail || "-"}
+          </td>
+
+          <td style={{ padding: 6, width: 100 }}>{it.status || "-"}</td>
+          <td style={{ padding: 6, width: 110 }}>{it.severity || "-"}</td>
+          <td style={{ padding: 6, width: 110 }}>{it.prediction || "-"}</td>
+
+          <td style={{ padding: 6, width: 90 }}>
+            {it.confidence_score
+              ? typeof it.confidence_score === "number" && it.confidence_score <= 1
+                ? `${(it.confidence_score * 100).toFixed(2)}%`
+                : String(it.confidence_score)
+              : "-"}
+          </td>
+
+          <td style={{ padding: 6, width: 360, display: "flex", gap: 8, alignItems: "center" }}>
+            <button className="btn-dark btn-pill" onClick={() => handleRowPredict(it.issue_key)}>Predict</button>
+            <input placeholder="Correct label" value={fbInputs[it.issue_key] || ""} onChange={(e) => setFbInput(it.issue_key, e.target.value)} style={{ width: 130 }} />
+            <button className="btn-dark btn-pill" onClick={() => handleRowFeedback(it)}>Save</button>
+
+            {/* REMOVE the old arrow anchor (you should delete this from your code if present):
+                <a className="btn-jira" href={`${JIRA_HOST}/browse/${it.issue_key}`} target="_blank" rel="noreferrer" title="Open in Jira" style={{ marginLeft: 6 }}>➤</a>
+               (We removed it because the ticket number itself is now the link above.)
+            */}
+
+            <button
+              className="btn btn-dark"
+              onClick={() => openUpdateDialog(it.issue_key!, it.prediction)}
+              disabled={isUpdating || !it.prediction}
+              style={{ marginLeft: 6 }}
+              title="Post automated updates to Jira"
+            >
+              {isUpdating ? "Posting…" : "Update Jira"}
+            </button>
+
+            {!!it.recommendations?.length && (
+              <button className="btn-dark" style={{ marginLeft: 6 }} onClick={() => openRecsModal(it.recommendations ?? null, `Similar tickets — ${it.issue_key}`)} aria-label={`Open similar tickets for ${it.issue_key}`} type="button">
+                View similar
+              </button>
+            )}
+          </td>
+        </tr>
+      );
+    })}
+  </tbody>
+</table>
+
+        </div>
+
+        <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
+          <button className="btn-dark" onClick={handleBulkFeedbackFromSelected} disabled={bulkFeedbackLoading || selectedKeys.length === 0}>
+            {bulkFeedbackLoading ? "Saving…" : `Save feedback for selected (${selectedKeys.length})`}
+          </button>
+        </div>
+      </div>
+
+      {/* Bottom: free-text classifier (full width below the sprint card) */}
+      <div className="card" style={{ width: "100%", minWidth: 0 }}>
         <h2>Predict (single)</h2>
         <form
           onSubmit={(e) => {
@@ -657,29 +1284,16 @@ const [updateCommentText, setUpdateCommentText] = useState<string>("");
         {singlePred.data && (
           <div style={{ marginTop: 12 }}>
             <h3>Result</h3>
-            <div>
-              <b>Prediction:</b> {singlePred.data.prediction}
-            </div>
-            <div>
-              <b>Confidence:</b> {(singlePred.data.confidence * 100).toFixed(1)}%
-            </div>
-            <div style={{ marginTop: 8 }}>
-              <b>Similar tickets</b>
-            </div>
+            <div><b>Prediction:</b> {singlePred.data.prediction}</div>
+            <div><b>Confidence:</b> {(singlePred.data.confidence * 100).toFixed(1)}%</div>
+
+            <div style={{ marginTop: 8 }}><b>Similar tickets</b></div>
             <div>
               {singlePred.data.recommendations.map((r: any, idx: number) => (
                 <div key={idx} style={{ marginBottom: 8, padding: 6, border: "1px solid #eee" }}>
-                  <div>
-                    <b>{r.issue_key || "(no key)"}</b> — <i>{r.label || "-"}</i>
-                  </div>
+                  <div><b>{r.issue_key || "(no key)"}</b> — <i>{r.label || "-"}</i></div>
                   <div>{r.summary}</div>
-                  {!!r.url && (
-                    <div>
-                      <a href={r.url} target="_blank" rel="noreferrer">
-                        open
-                      </a>
-                    </div>
-                  )}
+                  {!!r.url && (<div><a href={r.url} target="_blank" rel="noreferrer">open</a></div>)}
                   <small className="mono">similarity: {r.similarity.toFixed(3)}</small>
                 </div>
               ))}
@@ -687,17 +1301,11 @@ const [updateCommentText, setUpdateCommentText] = useState<string>("");
 
             <div style={{ marginTop: 12, display: "flex", gap: 8, alignItems: "center" }}>
               <input id="fb" placeholder="True label…" />
-              <button
-                className="secondary"
-                onClick={() => {
-                  const el = document.getElementById("fb") as HTMLInputElement | null;
-                  if (el?.value) {
-                    singleFb.mutate({ true_label: el.value });
-                  } else {
-                    showMessage("Enter a label");
-                  }
-                }}
-              >
+              <button className="secondary" onClick={() => {
+                const el = document.getElementById("fb") as HTMLInputElement | null;
+                if (el?.value) singleFb.mutate({ true_label: el.value });
+                else showMessage("Enter a label");
+              }}>
                 Send feedback
               </button>
             </div>
@@ -706,302 +1314,89 @@ const [updateCommentText, setUpdateCommentText] = useState<string>("");
         )}
       </div>
 
-      {/* Right: Sprint-driven prediction UI */}
-      <div className="card">
-        <h2>Predict (Sprint)</h2>
+      {/* Recommendations modal */}
+      {recsModalOpen && (
+        <div role="dialog" aria-modal="true" className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) closeRecsModal(); }}>
+          <div className="modal-panel" role="document">
+            <button className="modal-close" onClick={closeRecsModal} aria-label="Close recommendations">✕</button>
+            <h3 style={{ marginTop: 0 }}>{recsModalTitle}</h3>
+            <div style={{ maxHeight: "60vh", overflow: "auto", marginTop: 8 }}>
+              {Array.isArray(recsModalItems) && recsModalItems.length > 0 ? (
+                recsModalItems.map((r: any, i: number) => (
+                  <div key={i} style={{ padding: 10, borderBottom: "1px solid #f3f3f3", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: 700 }}>
+                        {r.issue_key || "(no key)"} {r.label ? <span style={{ fontWeight: 500, marginLeft: 8, color: "#666" }}>— {r.label}</span> : null}
+                      </div>
+                      <div style={{ marginTop: 6 }}>{r.summary}</div>
+                      <small className="mono">similarity: {typeof r.similarity === "number" ? r.similarity.toFixed(3) : "-"}</small>
+                    </div>
 
-        <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
-          <label style={{ marginRight: 6 }}>Sprint:</label>
-          <select value={selectedSprint} onChange={(e) => setSelectedSprint(e.target.value)} disabled={syncing || sprintsLoading}>
-            <option value="">-- select sprint --</option>
-            {sprints.map((s: string) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </select>
-
-         {/* <button
-            onClick={handleLoadIssuesForce}
-            disabled={!selectedSprint || issuesLoading}
-            className="btn btn-dark btn-pill"
-          >
-            {issuesLoading ? <span className="spinner" /> : "Load issues"}
-          </button> */}
-
-
-
-          <button
-            onClick={handleRefreshFromJira}
-            disabled={syncing}
-            className={`btn btn-warning btn-pill`}
-            title="Fetch latest sprints & issues from Jira"
-          >
-            {syncing ? <><span className="spinner" /> Syncing…</> : "Refresh from Jira"}
-          </button>
-
-
-          <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-            <button className="btn btn-dark" onClick={() => selectAllVisible(true)}>Select all</button>
-            <button className="btn btn-dark" onClick={() => selectAllVisible(false)}>Clear</button>
-            <button className="btn btn-dark" onClick={handlePredictSelected} disabled={bulkPredictLoading || selectedKeys.length === 0}>
-              {bulkPredictLoading ? "Predicting…" : `Predict selected (${selectedKeys.length})`}
-            </button>
-            <button className="btn btn-dark" onClick={handlePredictAllVisible} disabled={bulkPredictLoading || issues.length === 0}>
-              {bulkPredictLoading ? "Predicting…" : "Predict all visible"}
-            </button>
+                  </div>
+                ))
+              ) : (
+                <div style={{ padding: 12 }}>No recommendations available.</div>
+              )}
+            </div>
           </div>
         </div>
+      )}
 
-        <div style={{ maxHeight: 420, overflow: "auto", borderTop: "1px solid #eee", paddingTop: 8 }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead style={{ background: "#fafafa", position: "sticky", top: 0 }}>
-              <tr>
-                <th style={{ padding: 6 }}></th>
-                <th style={{ padding: 6 }}>Issue</th>
-                <th style={{ padding: 6 }}>Summary</th>
-                <th style={{ padding: 6 }}>Status</th>
-                <th style={{ padding: 6 }}>Severity</th>
-                <th style={{ padding: 6 }}>Prediction</th>
-                <th style={{ padding: 6 }}>Conf.</th>
-                <th style={{ padding: 6 }}>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {issues.map((it, idx) => {
-                const isUpdating = !!updatingMap[it.issue_key ?? ""];
-                return(
-                <tr key={it.issue_key || idx} style={{ borderBottom: "1px solid #f3f3f3" }}>
-                  <td style={{ padding: 6, width: 28 }}>
-                    <input type="checkbox" checked={!!selectedMap[it.issue_key]} onChange={() => toggleSelect(it.issue_key)} />
-                  </td>
-                  <td style={{ padding: 6, whiteSpace: "nowrap" }}>{it.issue_key}</td>
-                  <td style={{ padding: 6, maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis" }}>{it.summary || it.brief_detail}</td>
-                  <td style={{ padding: 6 }}>{it.status || "-"}</td>
-                  <td style={{ padding: 6 }}>{it.severity || "-"}</td>
-                  <td style={{ padding: 6 }}>{it.prediction || "-"}</td>
-                  <td style={{ padding: 6 }}>
-                    {it.confidence_score
-                      ? typeof it.confidence_score === "number" && it.confidence_score <= 1
-                        ? `${(it.confidence_score * 100).toFixed(2)}%`
-                        : String(it.confidence_score)
-                      : "-"}
-                  </td>
-                  <td style={{ padding: 6, display: "flex", gap: 8, alignItems: "center" }}>
-                    <button className="btn-primary" onClick={() => handleRowPredict(it.issue_key)}>Predict</button>
-                    <input placeholder="Correct label" value={fbInputs[it.issue_key] || ""} onChange={(e) => setFbInput(it.issue_key, e.target.value)} style={{ width: 130 }} />
-                    <button className="btn-dark btn-pill" onClick={() => handleRowFeedback(it)}>Save</button>
-                    {/* open in Jira */}
-                    <a
-                      className="btn-jira"
-                      href={`${JIRA_HOST}/browse/${it.issue_key}`}
-                      target="_blank"
-                      rel="noreferrer"
-                      title="Open in Jira"
-                      style={{ marginLeft: 6 }}
-                    >
-                      ➤
-                    </a>
-
-                    {/* update (comment) in Jira */}
-                    {/* <button
-                        className="btn btn-dark btn-pill"
-                        onClick={() => handlePostJiraComment(it.issue_key!, it.prediction)}
-                        disabled={!!updatingMap[it.issue_key!] || !it.prediction}
-                        style={{ marginLeft: 6 }}
-                        title="Post automated comment to Jira"
-                      >
-                        {updatingMap[it.issue_key!] ? "Posting…" : "Update Jira"}
-                      </button> */}
- 
-
-                      <button
-                        className="btn btn-dark"
-                        onClick={() => openUpdateDialog(it.issue_key!, it.prediction)}
-                        disabled={isUpdating || !it.prediction}
-                        style={{ marginLeft: 6 }}
-                        title="Post automated updates to Jira"
-                      >
-                        {isUpdating ? "Posting…" : "Update Jira"}
-                      </button>
-
-
-                    {/* replace old Recs button with this */}
-                    {!!it.recommendations?.length && (
-                      <button
-                        className="btn-dark"
-                        style={{ marginLeft: 6 }}
-                        onClick={() => openRecsModal(it.recommendations ?? null, `Similar tickets — ${it.issue_key}`)}
-                        aria-label={`Open similar tickets for ${it.issue_key}`}
-                        type="button"
-                      >
-                        View similar
-                      </button>
-                      
-                    )}
-
-
-                  </td>
-                </tr>
-                );
-            })}
-            </tbody>
-          </table>
+      {/* confirm + message + update dialogs remain unchanged (rendered as before) */}
+      {confirmOpen && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" onClick={(e) => { if (e.target === e.currentTarget) _closeConfirm(false); }}>
+          <div className="modal-panel" role="document" style={{ maxWidth: 560 }}>
+            <h3 style={{ marginTop: 0 }}>Confirm</h3>
+            <div style={{ marginTop: 8, color: "var(--muted)" }}>{confirmMessage}</div>
+            <div style={{ display: "flex", gap: 12, justifyContent: "flex-end", marginTop: 18 }}>
+              <button className="btn btn-ghost" onClick={() => _closeConfirm(false)} type="button">Cancel</button>
+              <button className="btn btn-dark" onClick={() => _closeConfirm(true)} type="button">OK</button>
+            </div>
+          </div>
         </div>
+      )}
 
-        <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
-          <button className="btn-dark" onClick={handleBulkFeedbackFromSelected} disabled={bulkFeedbackLoading || selectedKeys.length === 0}>
-            {bulkFeedbackLoading ? "Saving…" : `Save feedback for selected (${selectedKeys.length})`}
-          </button>
+      {msgOpen && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" onClick={(e) => { if (e.target === e.currentTarget) closeMessage(); }}>
+          <div className="modal-panel" role="document" style={{ maxWidth: 560 }}>
+            <h3 style={{ marginTop: 0 }}>Message</h3>
+            <div style={{ marginTop: 8, color: "var(--muted)" }}>{msgText}</div>
+            <div style={{ display: "flex", gap: 12, justifyContent: "flex-end", marginTop: 18 }}>
+              <button className="btn btn-dark" onClick={() => closeMessage()} type="button">OK</button>
+            </div>
+          </div>
         </div>
-      </div>
-      {/* Recommendations modal */}
-{recsModalOpen && (
-  <div
-    role="dialog"
-    aria-modal="true"
-    className="modal-overlay"
-    onClick={(e) => {
-      // click on overlay closes modal
-      if (e.target === e.currentTarget) closeRecsModal();
-    }}
-  >
-    <div className="modal-panel" role="document">
-      <button className="modal-close" onClick={closeRecsModal} aria-label="Close recommendations">✕</button>
-      <h3 style={{ marginTop: 0 }}>{recsModalTitle}</h3>
-      <div style={{ maxHeight: "60vh", overflow: "auto", marginTop: 8 }}>
-        {Array.isArray(recsModalItems) && recsModalItems.length > 0 ? (
-          recsModalItems.map((r: any, i: number) => (
-            <div key={i} style={{ padding: 10, borderBottom: "1px solid #f3f3f3", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 700 }}>{r.issue_key || "(no key)"} {r.label ? <span style={{ fontWeight: 500, marginLeft: 8, color: "#666" }}>— {r.label}</span> : null}</div>
-                <div style={{ marginTop: 6 }}>{r.summary}</div>
-                <small className="mono">similarity: {typeof r.similarity === "number" ? r.similarity.toFixed(3) : "-"}</small>
-              </div>
+      )}
 
-              <div style={{ marginLeft: 12, display: "flex", gap: 8, alignItems: "center" }}>
-                {!!r.url && (
-                  <a
-                    className="btn-jira"
-                    href={r.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    title="Open in Jira"
-                    onClick={(e) => {
-                      // keep default behaviour (open in new tab)
-                    }}
-                  >
-                    ➜
-                  </a>
-                )}
+      {updateDialogOpen && updateDialogIssue && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" onClick={(e) => { if (e.target === e.currentTarget) setUpdateDialogOpen(false); }}>
+          <div className="modal-panel" role="document" style={{ maxWidth: 520 }}>
+            <h3 style={{ marginTop: 0 }}>Update Jira — {updateDialogIssue.issueKey}</h3>
+            <div style={{ marginTop: 8 }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <input type="checkbox" checked={updateLabelChecked} onChange={(e) => setUpdateLabelChecked(e.target.checked)} />
+                <span>Update label to predicted value <small style={{ color: "#666", marginLeft: 6 }}>{updateDialogIssue.prediction ? `(${updateDialogIssue.prediction})` : "(no prediction)"}</small></span>
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
+                <input type="checkbox" checked={updateCommentChecked} onChange={(e) => setUpdateCommentChecked(e.target.checked)} />
+                <span>Add / edit the automated comment</span>
+              </label>
+              <div style={{ marginTop: 10 }}>
+                <textarea value={updateCommentText} onChange={(e) => setUpdateCommentText(e.target.value)} rows={6} style={{ width: "100%", resize: "vertical", padding: 8, fontFamily: "inherit", fontSize: 14, borderRadius: 6, border: "1px solid #ddd" }} disabled={!updateCommentChecked} />
+                <div style={{ marginTop: 6, color: "#666", fontSize: 12, display: "flex", justifyContent: "space-between" }}>
+                  <div>{updateCommentText.length} characters</div>
+                  <div>{updateCommentText.split("\n").length} lines</div>
+                </div>
               </div>
             </div>
-          ))
-        ) : (
-          <div style={{ padding: 12 }}>No recommendations available.</div>
-        )}
-      </div>
-    </div>
-  </div>
-)}
-
-{/* ===== Confirm modal (awaitable) ===== */}
-{confirmOpen && (
-  <div className="modal-overlay" role="dialog" aria-modal="true" onClick={(e) => { if (e.target === e.currentTarget) _closeConfirm(false); }}>
-    <div className="modal-panel" role="document" style={{ maxWidth: 560 }}>
-      <h3 style={{ marginTop: 0 }}>Confirm</h3>
-      <div style={{ marginTop: 8, color: "var(--muted)" }}>{confirmMessage}</div>
-
-      <div style={{ display: "flex", gap: 12, justifyContent: "flex-end", marginTop: 18 }}>
-        <button className="btn btn-ghost btn-pill" onClick={() => _closeConfirm(false)} type="button">Cancel</button>
-        <button className="btn btn-primary btn-pill" onClick={() => _closeConfirm(true)} type="button">OK</button>
-      </div>
-    </div>
-  </div>
-)}
-
-{/* ===== Message modal (informational) ===== */}
-{msgOpen && (
-  <div className="modal-overlay" role="dialog" aria-modal="true" onClick={(e) => { if (e.target === e.currentTarget) closeMessage(); }}>
-    <div className="modal-panel" role="document" style={{ maxWidth: 560 }}>
-      <h3 style={{ marginTop: 0 }}>Message</h3>
-      <div style={{ marginTop: 8, color: "var(--muted)" }}>{msgText}</div>
-
-      <div style={{ display: "flex", gap: 12, justifyContent: "flex-end", marginTop: 18 }}>
-        <button className="btn btn-primary btn-pill" onClick={() => closeMessage()} type="button">OK</button>
-      </div>
-    </div>
-  </div>
-)}
-
-{updateDialogOpen && updateDialogIssue && (
-  <div
-    className="modal-overlay"
-    role="dialog"
-    aria-modal="true"
-    onClick={(e) => { if (e.target === e.currentTarget) setUpdateDialogOpen(false); }}
-  >
-    <div className="modal-panel" role="document" style={{ maxWidth: 520 }}>
-      <h3 style={{ marginTop: 0 }}>Update Jira — {updateDialogIssue.issueKey}</h3>
-
-      <div style={{ marginTop: 8 }}>
-        <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <input
-            type="checkbox"
-            checked={updateLabelChecked}
-            onChange={(e) => setUpdateLabelChecked(e.target.checked)}
-          />
-          <span>
-            Update label to predicted value{" "}
-            <small style={{ color: "#666", marginLeft: 6 }}>
-              {updateDialogIssue.prediction ? `(${updateDialogIssue.prediction})` : "(no prediction)"}
-            </small>
-          </span>
-        </label>
-
-        <label style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
-          <input
-            type="checkbox"
-            checked={updateCommentChecked}
-            onChange={(e) => setUpdateCommentChecked(e.target.checked)}
-          />
-          <span>Add / edit the automated comment</span>
-        </label>
-
-        {/* NEW: editable comment textarea */}
-        <div style={{ marginTop: 10 }}>
-          <textarea
-            value={updateCommentText}
-            onChange={(e) => setUpdateCommentText(e.target.value)}
-            rows={6}
-            style={{
-              width: "100%",
-              resize: "vertical",
-              padding: 8,
-              fontFamily: "inherit",
-              fontSize: 14,
-              borderRadius: 6,
-              border: "1px solid #ddd",
-            }}
-            disabled={!updateCommentChecked}
-          />
-          <div style={{ marginTop: 6, color: "#666", fontSize: 12, display: "flex", justifyContent: "space-between" }}>
-            <div>{updateCommentText.length} characters</div>
-            <div>{updateCommentText.split("\n").length} lines</div>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 18 }}>
+              <button className="btn btn-ghost" onClick={() => setUpdateDialogOpen(false)} type="button">Cancel</button>
+              <button className="btn btn-dark" onClick={confirmUpdateDialog} type="button">OK</button>
+            </div>
           </div>
         </div>
-      </div>
-
-      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 18 }}>
-        <button className="btn btn-ghost btn-pill" onClick={() => setUpdateDialogOpen(false)} type="button">Cancel</button>
-        <button className="btn btn-primary btn-pill" onClick={confirmUpdateDialog} type="button">OK</button>
-      </div>
-    </div>
-  </div>
-)}
-
-
-
+      )}
     </div>
   );
+
 }

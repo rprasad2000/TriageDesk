@@ -170,7 +170,7 @@ export default function Retrain() {
         <button
           onClick={() => mRetrain.mutate()}
           disabled={mRetrain.isPending}
-          className="btn btn-primary btn-pill"
+          className="btn-recs"
           type="button"
         >
           {mRetrain.isPending ? (

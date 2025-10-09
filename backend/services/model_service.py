@@ -269,41 +269,84 @@ def build_df_from_jira_issues(issues: List[Dict[str, Any]], host: str) -> pd.Dat
         * a single dict or string
     We try to parse any of the above and take the *latest* sprint name if multiple exist.
     """
-    def _extract_sprint_name(fields: Dict[str, Any]) -> str:
-        # 1) Prefer well-known key
-        candidates = []
-        if "customfield_10020" in fields:
-            candidates.append(("customfield_10020", fields.get("customfield_10020")))
+    # def _extract_sprint_name(fields: Dict[str, Any]) -> str:
+    #     # 1) Prefer well-known key
+    #     candidates = []
+    #     if "customfield_10020" in fields:
+    #         candidates.append(("customfield_10020", fields.get("customfield_10020")))
 
-        # 2) Fallback: scan any key that looks like 'sprint' (case-insensitive)
+    #     # 2) Fallback: scan any key that looks like 'sprint' (case-insensitive)
+    #     for k, v in fields.items():
+    #         if "sprint" in str(k).lower() and k != "customfield_10020":
+    #             candidates.append((k, v))
+
+    #     def _parse_one(val: Any) -> list[str]:
+    #         names: list[str] = []
+    #         if isinstance(val, list):
+    #             for item in val:
+    #                 names.extend(_parse_one(item))
+    #         elif isinstance(val, dict):
+    #             # Most modern Jira return dicts with "name"
+    #             n = val.get("name")
+    #             if isinstance(n, str) and n.strip():
+    #                 names.append(n.strip())
+    #         elif isinstance(val, str):
+    #             # Old Agile plugin returns string blobs; pull name=... until comma or ]
+    #             m = re.search(r"name=([^,\]]+)", val)
+    #             if m:
+    #                 names.append(m.group(1).strip())
+    #         return names
+
+    #     for _k, v in candidates:
+    #         names = _parse_one(v)
+    #         if names:
+    #             # if multiple sprints, take the last (usually the most recent board sprint)
+    #             return names[-1]
+    #     return ""
+   
+    def _extract_sprint_name(fields: Dict[str, Any]) -> str:
+    # 1) known field keys to try first (extendable)
+        known_keys = ["customfield_10020", "customfield_10100", "customfield_10200"]
+        candidates = []
+        for k in known_keys:
+            if k in fields:
+                candidates.append((k, fields.get(k)))
+        # 2) fallback: any key that looks like 'sprint'
         for k, v in fields.items():
-            if "sprint" in str(k).lower() and k != "customfield_10020":
+            if "sprint" in str(k).lower() and k not in known_keys:
                 candidates.append((k, v))
 
-        def _parse_one(val: Any) -> list[str]:
-            names: list[str] = []
+        def parse_val(val):
+            names = []
             if isinstance(val, list):
                 for item in val:
-                    names.extend(_parse_one(item))
+                    names.extend(parse_val(item))
             elif isinstance(val, dict):
-                # Most modern Jira return dicts with "name"
-                n = val.get("name")
+                # common keys: name, value, id
+                n = val.get("name") or val.get("value") or val.get("displayName") or ""
                 if isinstance(n, str) and n.strip():
                     names.append(n.strip())
+                # sometimes sprint info inside 'fields' or 'raw' nested keys; try flattening text
+                # try to extract name=... patterns from stringified dicts later if needed
             elif isinstance(val, str):
-                # Old Agile plugin returns string blobs; pull name=... until comma or ]
+                # 1) try name=... (old-style blob)
                 m = re.search(r"name=([^,\]]+)", val)
                 if m:
                     names.append(m.group(1).strip())
+                else:
+                    # 2) heuristics: if the value *looks* like a Sprint name, take it
+                    if re.search(r"\bSprint\b", val, re.I):
+                        names.append(val.strip())
+                    # else ignore
+
             return names
 
         for _k, v in candidates:
-            names = _parse_one(v)
+            names = parse_val(v)
             if names:
-                # if multiple sprints, take the last (usually the most recent board sprint)
                 return names[-1]
         return ""
-   
+
     rows = []
     for raw in issues:
         key = raw.get("key")
