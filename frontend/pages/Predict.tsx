@@ -257,7 +257,7 @@ function ScatterSVG({ width, height, points, categories }: ScatterSVGProps) {
           <div style={{ marginTop: 6, fontSize: 13 }}>
             <div><b>Pred:</b> {tip.prediction || "N/A"}</div>
             <div><b>Severity:</b> {tip.severity || "N/A"}</div>
-            <div><b>Conf:</b> {Number(tip.confidence).toFixed(2)}%</div>
+            <div><b>Conf:</b> {tip.confidence?.toFixed(2)}%</div>
             <div style={{ marginTop: 8, color: "#333" }}>{tip.summary}</div>
           </div>
 
@@ -321,28 +321,7 @@ export default function Predict() {
     },
   });
 
-// const postCommentMut = useMutation<any, Error, { issueKey: string; comment: string }>({
-//   mutationFn: ({ issueKey, comment }) => postJiraComment(issueKey, comment),
-//   // optimistic UI: set updating flag
-//   onMutate: ({ issueKey }) => {
-//     setUpdating(issueKey, true);
-//     return { issueKey };
-//   },
-//   onSuccess: (data, variables) => {
-//     showMessage(`Comment posted to ${variables.issueKey}.`);
-//     // optionally, you may also invalidate queries to refresh issues
-//     queryClient.invalidateQueries({ queryKey: ["issues", selectedSprint] });
-//   },
-//   onError: (err, variables) => {
-//     console.error("Failed to post Jira comment", err);
-//     showMessage("Failed to post comment: " + (err?.message || "unknown error"));
-//   },
-//   onSettled: (_data, _err, variables) => {
-//     if (variables?.issueKey) setUpdating(variables.issueKey, false);
-//   },
-// });
 
- 
 
   /* --- New: Sprint-based bulk prediction (use cached live sprints) --- */
 
@@ -706,29 +685,29 @@ const confirmUpdateDialog = async () => {
 
 
   // --- add this inside the Predict() component (e.g. right after handleRefreshFromJira) ---
-const handleLoadIssuesForce = async () => {
-  if (!selectedSprint) return;
-  try {
-    // optional quick UI guard: we already have issuesLoading from useQuery so reuse that for disabling button
-    // Force a network fetch (bypass caches) and get the freshest issues for the selected sprint
-    const resp = await api.get("/issues", {
-      params: { sprint: selectedSprint, max_results: 5000 },
-      headers: { "Cache-Control": "no-cache", Pragma: "no-cache" },
-    });
-    const freshIssues: IssueRow[] = Array.isArray(resp?.data) ? resp.data : [];
+  const handleLoadIssuesForce = async () => {
+    if (!selectedSprint) return;
+    try {
+      // optional quick UI guard: we already have issuesLoading from useQuery so reuse that for disabling button
+      // Force a network fetch (bypass caches) and get the freshest issues for the selected sprint
+      const resp = await api.get("/issues", {
+        params: { sprint: selectedSprint, max_results: 5000 },
+        headers: { "Cache-Control": "no-cache", Pragma: "no-cache" },
+      });
+      const freshIssues: IssueRow[] = Array.isArray(resp?.data) ? resp.data : [];
 
-    // Immediately update react-query cache so UI updates instantly
-    queryClient.setQueryData(["issues", selectedSprint], freshIssues);
-    // Mark queries stale/invalidate so react-query consumers update cleanly
-    queryClient.invalidateQueries({ queryKey: ["issues", selectedSprint] });
+      // Immediately update react-query cache so UI updates instantly
+      queryClient.setQueryData(["issues", selectedSprint], freshIssues);
+      // Mark queries stale/invalidate so react-query consumers update cleanly
+      queryClient.invalidateQueries({ queryKey: ["issues", selectedSprint] });
 
-    // (optional) also update local state if you want immediate setIssues — not required because useQuery consumers will read cache
-    setIssues(Array.isArray(freshIssues) ? [...freshIssues] : []);
-  } catch (err) {
-    console.error("Failed to force-load issues:", err);
-    showMessage("Failed to load issues from server. Try Refresh from Jira.");
-  }
-};
+      // (optional) also update local state if you want immediate setIssues — not required because useQuery consumers will read cache
+      setIssues(Array.isArray(freshIssues) ? [...freshIssues] : []);
+    } catch (err) {
+      console.error("Failed to force-load issues:", err);
+      showMessage("Failed to load issues from server. Try Refresh from Jira.");
+    }
+  };
 
  
   // keep local `issues` state but only update it when content actually changed (prevents setState churn)
@@ -742,6 +721,86 @@ const handleLoadIssuesForce = async () => {
     }
     // depend only on the data itself
   }, [issuesFromApi]);
+
+     // --- Scatter chart state & helpers (INSERT after existing state declarations) ---
+  const SEVERITY_CATEGORIES = ["Blocker", "Major","Critical","Minor"];
+  const [chartLoading, setChartLoading] = useState(false);
+  // bump this to force re-fetch (we'll increment after Jira sync finishes)
+  const [scatterRefreshCounter, setScatterRefreshCounter] = useState(0);
+  const normalizeAndFilterScatterData = (data: any[]) => {
+  const OPEN_STATUSES = ["open", "reopened", "re-opened", "in progress", "inprogress"];
+
+  return data
+    .map((it: any) => {
+      const issue_key = String(it.incident_no || it.issue_key || it.key || "").trim();
+      const summary = String(it.brief_detail || it.summary || "").trim();
+      const ticket_description = String(it.description || it.ticket_description || "").trim();
+      const severity = String(it.severity || "").trim();
+      const prediction = String(it.prediction || "N/A").trim();
+      const confidence = Number(it.confidence_score ?? 0);
+      const status = String(it.status || "").trim().toLowerCase();
+      const url = it.url || `${JIRA_HOST}/browse/${issue_key}`;
+
+      return {
+        issue_key,
+        summary,
+        ticket_description,
+        severity,
+        prediction,
+        confidence,
+        status,
+        url,
+      };
+    })
+    .filter((p) => {
+      // ✅ Status filter: allow only open/reopened/in-progress (case-insensitive)
+      const openMatch = OPEN_STATUSES.some((s) => p.status.includes(s));
+      if (!openMatch) return false;
+
+      // ✅ Severity filter
+      const sevMatch = SEVERITY_CATEGORIES.includes(p.severity);
+      if (!sevMatch) return false;
+
+      return true;
+    });
+};
+
+
+  useEffect(() => {
+  // re-fetch scatter whenever selected sprint changes OR scatterRefreshCounter increments
+  if (!selectedSprint) {
+    setScatterPoints([]);
+    return;
+  }
+
+  let cancelled = false;
+  (async () => {
+    try {
+      setChartLoading(true);
+      const resp = await api.get("/incidents/for-scatter", {
+        params: { max_results: 1000, issuetype: "Bug", sprint: selectedSprint },
+        headers: { "Cache-Control": "no-cache", Pragma: "no-cache" },
+      });
+      if (cancelled) return;
+      const data = Array.isArray(resp?.data) ? resp.data : [];
+      const filtered = normalizeAndFilterScatterData(data);
+      setScatterPoints(filtered);
+    } catch (err) {
+      if (!cancelled) {
+        console.error("❌ Scatter fetch failed", err);
+        setScatterPoints([]);
+      }
+    } finally {
+      if (!cancelled) setChartLoading(false);
+    }
+  })();
+
+  return () => {
+    cancelled = true;
+  };
+// include scatterRefreshCounter here so handleRefreshFromJira's increment forces a re-fetch
+}, [selectedSprint, scatterRefreshCounter]);
+
 
   // per-issue "posting" map to show posting state only for the clicked row
 const [updatingMap, setUpdatingMap] = useState<Record<string, boolean>>({});
@@ -896,208 +955,18 @@ const [updateCommentText, setUpdateCommentText] = useState<string>("");
   const bulkPredictLoading = bulkPredictMut.status === "pending";
   const bulkFeedbackLoading = bulkFeedbackMut.status === "pending";
   
-  // --- Scatter chart state & helpers (INSERT after existing state declarations) ---
-const SEVERITY_CATEGORIES = ["Blocker", "Major", "Minor", "Critical"];
 
-const [scatterPoints, setScatterPoints] = useState<
-  {
-    issue_key: string;
-    summary: string;
-    ticket_description: string;
-    severity: string;
-    prediction: string;
-    confidence: number; // 0..100 percent
-    url?: string;
-  }[]
->([]);
-
-const [chartLoading, setChartLoading] = useState(false);
-// bump this to force re-fetch (we'll increment after Jira sync finishes)
-const [scatterRefreshCounter, setScatterRefreshCounter] = useState(0);
-
-// Fetch lightweight data for scatter. Dependent only on selectedSprint or manual refresh.
-  useEffect(() => {
-  let mounted = true;
-  const load = async () => {
-    setChartLoading(true);
-    try {
-      const params: any = { max_results: 1000 };
-      if (selectedSprint) params.sprint = selectedSprint;
-      // NOTE: backend mapping might route /incidents/for-scatter -> /incidents;
-      // we still call the same endpoint and apply client-side filters to be safe.
-      const resp = await api.get("/incidents/for-scatter", { params });
-      const data = Array.isArray(resp?.data) ? resp.data : [];
-      if (!mounted) return;
-
-      // ---------- helpers: robust extraction ----------
-      const OPEN_STATUSES = new Set([
-        "open",
-        "in progress",
-        "inprogress",
-        "reopened",
-        "re-opened",
-        "reopen",
-        "re-open",
-        "triage",
-        // add other tenant-specific names here if needed
-      ]);
-
-      const extractLabels = (it: any): string[] => {
-        // try multiple common shapes
-        try {
-          // canonical single label field
-          if (it.label && String(it.label).trim()) {
-            return [String(it.label).trim()];
-          }
-          // array of labels
-          if (Array.isArray(it.labels) && it.labels.length) {
-            return it.labels.map((x: any) => String(x || "").trim()).filter(Boolean);
-          }
-          // Jira raw fields container
-          if (it.fields && Array.isArray(it.fields.labels) && it.fields.labels.length) {
-            return it.fields.labels.map((x: any) => String(x || "").trim()).filter(Boolean);
-          }
-          // sometimes labels come as comma/pipe/semicolon separated string
-          const cand = it.labels ?? it.label ?? it.labels_str ?? it.raw_labels ?? "";
-          if (typeof cand === "string" && cand.trim()) {
-            return cand.split(/[;,|]+/).map((s: string) => s.trim()).filter(Boolean);
-          }
-        } catch (e) {
-          // ignore
-        }
-        return [];
-      };
-
-      const extractStatus = (it: any): string => {
-        try {
-          let s: any = it.status ?? it.Status ?? (it.fields && it.fields.status) ?? "";
-          if (!s) return "";
-          if (typeof s === "string") return s.trim();
-          if (typeof s === "object") {
-            // common keys
-            return String(s.name || s.displayName || s.status || "").trim();
-          }
-          return String(s).trim();
-        } catch (e) {
-          return "";
-        }
-      };
-
-      // ---------- normalize into points ----------
-      let pts = data.map((it: any) => {
-        const issue_key = (it.issue_key || it.incident_no || it.key || it.issueKey || "").toString();
-        const summary = String(it.summary || it.brief_detail || it.title || "").slice(0, 300);
-        const ticket_description = String(it.ticket_description || it.description || summary).slice(0, 500);
-        const severity = String(it.severity ?? it.Severity ?? "").trim();
-
-        const rawPred = it.prediction ?? it.predicted ?? it.pred_label ?? it.pred ?? "";
-        const prediction = String(rawPred ?? "").trim();
-
-        let confidence = Number(it.confidence_score ?? it.confidence ?? it.confidence_pct ?? 0);
-        if (!Number.isFinite(confidence)) confidence = 0;
-        if (confidence > 0 && confidence <= 1) confidence = confidence * 100;
-        confidence = Math.max(0, Math.min(100, confidence));
-
-        const url = it.url || (issue_key ? `${JIRA_HOST}/browse/${issue_key}` : "");
-        const status = extractStatus(it);
-        const status_norm = String(status).toLowerCase().replace(/[_-]+/g, " ").trim();
-
-        const labels = extractLabels(it); // array
-
-        return {
-          raw: it,
-          issue_key,
-          summary,
-          ticket_description,
-          severity,
-          prediction,
-          confidence,
-          url,
-          status,
-          status_norm,
-          labels,
-        };
-      });
-
-      // ---------- Filter: keep only open statuses AND label-empty issues ----------
-      pts = pts.filter((p: any) => {
-        // must belong to our severity buckets (optional, keeps chart tidy)
-        if (!SEVERITY_CATEGORIES.includes(p.severity)) return false;
-
-        // status must be open-like
-        if (!p.status_norm || !OPEN_STATUSES.has(p.status_norm)) return false;
-
-        // labels must be empty (no labels in array and no canonical label)
-        if (Array.isArray(p.labels) && p.labels.length > 0) return false;
-        // also check canonical 'label' or 'label' inside raw payload
-        const canonicalLabel = String((p.raw && (p.raw.label ?? p.raw.pred_label ?? "")) || "").trim();
-        if (canonicalLabel) return false;
-
-        return true;
-      });
-
-      // ---------- If some points have no prediction, request bulk predict and merge ----------
-      const needPredKeys = pts
-        .filter((p: any) => !p.prediction || p.prediction === "" || p.prediction === "N/A")
-        .map((p: any) => p.issue_key)
-        .filter(Boolean);
-
-      if (needPredKeys.length > 0) {
-        try {
-          const bulkResp = await api.post("/predict/bulk", { issue_keys: needPredKeys, top_k: 1 });
-          const preds = Array.isArray(bulkResp?.data?.predictions) ? bulkResp.data.predictions : [];
-
-          const byKey = new Map<string, any>();
-          for (const r of preds) {
-            const k = r.issue_key || r.issueKey || r.key;
-            let conf = Number(r.confidence ?? r.confidence_score ?? 0);
-            if (!Number.isFinite(conf)) conf = 0;
-            if (conf > 0 && conf <= 1) conf = conf * 100;
-            conf = Math.max(0, Math.min(100, conf));
-            byKey.set(k, { prediction: String(r.prediction ?? r.label ?? r.pred ?? "").trim(), confidence: conf });
-          }
-
-          pts = pts.map((p: any) => {
-            if ((!p.prediction || p.prediction === "" || p.prediction === "N/A") && byKey.has(p.issue_key)) {
-              const nw = byKey.get(p.issue_key);
-              return {
-                ...p,
-                prediction: nw.prediction || "N/A",
-                confidence: typeof nw.confidence === "number" ? nw.confidence : p.confidence,
-              };
-            }
-            return p;
-          });
-        } catch (err) {
-          console.warn("Bulk predict failed for scatter points:", err);
-        }
-      }
-
-      // final mapping to shape expected by ScatterSVG (strip extras)
-      const finalPts = pts.map((p: any) => ({
-        issue_key: p.issue_key,
-        summary: p.summary,
-        ticket_description: p.ticket_description,
-        severity: p.severity,
-        prediction: p.prediction,
-        confidence: Number(p.confidence) || 0,
-        url: p.url,
-      }));
-
-      if (mounted) setScatterPoints(finalPts);
-    } catch (e) {
-      console.error("Failed to load scatter data", e);
-      if (mounted) setScatterPoints([]);
-    } finally {
-      if (mounted) setChartLoading(false);
-    }
-  };
-
-  load();
-  return () => {
-    mounted = false;
-  };
-}, [selectedSprint, scatterRefreshCounter]);
+  const [scatterPoints, setScatterPoints] = useState<
+    {
+      issue_key: string;
+      summary: string;
+      ticket_description: string;
+      severity: string;
+      prediction: string;
+      confidence: number; // 0..100 percent
+      url?: string;
+    }[]
+  >([]);
 
 
     return (
@@ -1132,14 +1001,43 @@ const [scatterRefreshCounter, setScatterRefreshCounter] = useState(0);
 
         <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
           <label style={{ marginRight: 6 }}>Sprint:</label>
-          <select value={selectedSprint} onChange={(e) => setSelectedSprint(e.target.value)} disabled={syncing || sprintsLoading}>
-            <option value="">-- select sprint --</option>
-            {sprints.map((s: string) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </select>
+           <select
+              value={selectedSprint}
+              onChange={(e) => {
+                const val = e.target.value;
+                setSelectedSprint(val);
+                console.log("🔄 Sprint changed:", val);
+
+                (async () => {
+                try {
+                  const resp = await api.get("/incidents/for-scatter", {
+                    params: { max_results: 1000, issuetype: "Bug", sprint: val },
+                    headers: { "Cache-Control": "no-cache" },
+                  });
+                  const data = Array.isArray(resp?.data) ? resp.data : [];
+                  console.log("✅ Scatter raw data:", data);
+
+                  // ✅ Apply same filters + normalization
+                  const filtered = normalizeAndFilterScatterData(data);
+                  console.log("✅ Filtered scatter points:", filtered);
+
+                  setScatterPoints(filtered);
+                } catch (err) {
+                  console.error("❌ Scatter fetch failed", err);
+                  setScatterPoints([]);
+                }
+              })();
+
+              }}
+              disabled={syncing || sprintsLoading}
+            >
+              <option value="">-- select sprint --</option>
+              {sprints.map((s: string) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
 
           <button
             onClick={handleRefreshFromJira}

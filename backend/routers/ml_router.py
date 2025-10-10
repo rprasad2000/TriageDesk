@@ -18,6 +18,7 @@ from typing import Optional
 from services.model_service import (
     DATA_DIR,
     CORPUS_PATH,
+    _host_issue_url,
     train_from_dataframe,
     classify_and_recommend,
     save_feedback,
@@ -277,70 +278,6 @@ async def sync_board(max_results: int = 2000):
         return {"status": "error", "detail": str(e)}
 
 
-# @router.get("/incidents")
-# async def get_incidents(
-#     max_results: int = Query(2000, description="Max issues to fetch"),
-#     issuetype: Optional[str] = Query("Bug", description="Jira issuetype to query (e.g. Bug, Story). Set to '' to not filter by issuetype")
-# ):
-#     """
-#     Fetch issues from Jira, enrich with predictions.
-#     Returns full list (up to max_results). If no issues found, returns an empty list (200).
-#     """
-#     # build JQL depending on issuetype param (allow empty to skip issuetype filter)
-#     if issuetype and str(issuetype).strip():
-#         jql = f"""project = '{PROJECT_KEY}' AND issuetype = {issuetype} ORDER BY created DESC"""
-#     else:
-#         jql = f"""project = '{PROJECT_KEY}' ORDER BY created DESC"""
-
-#     jira = JiraUtility(HOST, USERNAME, API_TOKEN)
-#     try:
-#         raw = await jira.get_issues(jql=jql, max_results=max_results)
-#     except Exception as e:
-#         # surface upstream errors clearly
-#         raise HTTPException(status_code=502, detail=f"Failed to query Jira: {e}")
-
-#     # Normalize payload (accept raw dict from helper or list)
-#     issues = _normalize_jira_issues_payload(raw)
-#     logger.info(f"GET /incidents -> Jira returned raw type {type(raw)}, normalized issues: {len(issues)}")
-
-#     # If no issues found, return an empty list (frontend can show message)
-#     if not issues:
-#         return []
-
-#     df = build_df_from_jira_issues(issues, HOST)
-
-#     enriched = []
-#     for _, row in df.iterrows():
-#         pred = _safe_predict(row["ticket_description"], top_k=3)
-#         enriched.append({
-#             "incident_no": row.get("issue_key", ""),
-#             "creation_time": row.get("created", ""),
-#             "priority": row.get("priority", ""),
-#             "brief_detail": row.get("summary", ""),
-#             "description": row.get("ticket_description", ""),
-#             "status": row.get("status", ""),
-#             "severity": row.get("severity", ""),
-#             "root_cause": row.get("root_cause", ""),
-#             "prediction": pred.get("prediction", ""),
-#             "confidence_score": round(pred.get("confidence", 0.0) * 100, 2),
-#             "recommendation": pred.get("recommendations", []),
-#             # also include sprint if present in Jira payload
-#             "Sprint": row.get("sprint", "") if "sprint" in row else "",
-#         })
-#     return enriched
-
-# @router.get("/incidents/for-scatter")
-# async def incidents_for_scatter(max_results: int = Query(1000), issuetype: Optional[str] = Query("Bug")):
-#     """
-#     Compatibility alias for older frontend calls that requested `/incidents/for-scatter`.
-#     Delegates to the existing /incidents endpoint implementation.
-#     """
-#     # call the existing handler defined in this file
-#     return await get_incidents(max_results=max_results, issuetype=issuetype)
-
-# Replace the existing endpoints with this code
-
-
 _OPEN_STATUSES = {"open", "in progress", "inprogress", "reopened", "re-opened", "re-open", "re open"}
 
 @router.get("/incidents")
@@ -465,9 +402,9 @@ async def incidents_for_scatter(
         # 2) labels must be empty (both raw labels and canonical 'label' should be empty)
         raw_labels = labels_map.get(issue_key, [])
         canonical_label = (row.get("label", "") or "").strip()
-        if (isinstance(raw_labels, list) and len(raw_labels) > 0) or canonical_label != "":
-            # skip labeled issues
-            continue
+        # if (isinstance(raw_labels, list) and len(raw_labels) > 0) or canonical_label != "":
+        #     # skip labeled issues
+        #     continue
 
         # produce lightweight payload expected by Predict.tsx scatter loader
         out.append({
@@ -1067,11 +1004,37 @@ async def validate_jira():
     except Exception as e:
         return {"ok": False, "detail": str(e)}
 
+# @router.get("/debug/jira-sample")
+# async def debug_jira_sample(max_results: int = 5):
+#     """
+#     Debug helper: fetch a small number of Jira issues with the current JQL and return raw payload.
+#     Use from Swagger to inspect exactly what Jira returns (which fields contain sprint).
+#     """
+#     jira = JiraUtility(HOST, USERNAME, API_TOKEN)
+#     jql = f"project = '{PROJECT_KEY}' AND issuetype = Bug ORDER BY created DESC"
+#     try:
+#         raw = await jira.get_issues(jql=jql, max_results=max_results)
+#     except Exception as e:
+#         raise HTTPException(status_code=502, detail=f"Jira fetch failed: {e}")
+#     issues = _normalize_jira_issues_payload(raw)
+#     if not issues:
+#         return {"n_issues": 0, "issues": []}
+#     # sample first 3 issues (strip large fields)
+#     out = []
+#     for raw_issue in issues[:3]:
+#         out.append({
+#             "key": raw_issue.get("key"),
+#             "summary": (raw_issue.get("fields") or {}).get("summary"),
+#             "sprint_fields_keys": [k for k in (raw_issue.get("fields") or {}).keys() if "sprint" in str(k).lower()],
+#             "fields_sample": {k: (raw_issue.get("fields") or {}).get(k) for k in sorted(list(raw_issue.get("fields") or {}).keys())[:20]}
+#         })
+#     return {"n_issues": len(issues), "issues_sample": out}
 @router.get("/debug/jira-sample")
 async def debug_jira_sample(max_results: int = 5):
     """
     Debug helper: fetch a small number of Jira issues with the current JQL and return raw payload.
     Use from Swagger to inspect exactly what Jira returns (which fields contain sprint).
+    Defensive against unexpected shapes for 'fields' (dict/list/other).
     """
     jira = JiraUtility(HOST, USERNAME, API_TOKEN)
     jql = f"project = '{PROJECT_KEY}' AND issuetype = Bug ORDER BY created DESC"
@@ -1079,16 +1042,55 @@ async def debug_jira_sample(max_results: int = 5):
         raw = await jira.get_issues(jql=jql, max_results=max_results)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Jira fetch failed: {e}")
+
     issues = _normalize_jira_issues_payload(raw)
     if not issues:
         return {"n_issues": 0, "issues": []}
-    # sample first 3 issues (strip large fields)
+
     out = []
+    # Inspect up to first 3 issues in the normalized list
     for raw_issue in issues[:3]:
+        key = raw_issue.get("key")
+        fields = raw_issue.get("fields") or {}
+
+        # Prepare a safe sample of fields (max ~20 keys when dict-like)
+        if isinstance(fields, dict):
+            try:
+                keys = sorted(list(fields.keys()))
+            except Exception:
+                keys = list(fields.keys()) if hasattr(fields, "keys") else []
+            sample_keys = keys[:20]
+            fields_sample = {k: fields.get(k) for k in sample_keys}
+            sprint_fields_keys = [k for k in keys if "sprint" in str(k).lower()]
+            summary = fields.get("summary")
+        elif isinstance(fields, list):
+            # If list of dicts, sample the first dict's keys; otherwise provide a short string preview
+            first = fields[0] if len(fields) > 0 else None
+            if isinstance(first, dict):
+                try:
+                    keys = sorted(list(first.keys()))
+                except Exception:
+                    keys = list(first.keys()) if hasattr(first, "keys") else []
+                sample_keys = keys[:20]
+                fields_sample = {k: first.get(k) for k in sample_keys}
+                sprint_fields_keys = [k for k in keys if "sprint" in str(k).lower()]
+                summary = first.get("summary")
+            else:
+                # non-dict list; provide short preview
+                fields_sample = {"raw_preview": str(fields)[:500]}
+                sprint_fields_keys = []
+                summary = None
+        else:
+            # fields is some other type (string/number/None) — stringify safely
+            fields_sample = {"raw_preview": str(fields)[:500]}
+            sprint_fields_keys = []
+            summary = None
+
         out.append({
-            "key": raw_issue.get("key"),
-            "summary": (raw_issue.get("fields") or {}).get("summary"),
-            "sprint_fields_keys": [k for k in (raw_issue.get("fields") or {}).keys() if "sprint" in str(k).lower()],
-            "fields_sample": {k: (raw_issue.get("fields") or {}).get(k) for k in sorted(list(raw_issue.get("fields") or {}).keys())[:20]}
+            "key": key,
+            "summary": summary,
+            "sprint_fields_keys": sprint_fields_keys,
+            "fields_sample": fields_sample
         })
+
     return {"n_issues": len(issues), "issues_sample": out}
