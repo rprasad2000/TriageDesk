@@ -18,6 +18,7 @@ from typing import Optional
 from services.model_service import (
     DATA_DIR,
     CORPUS_PATH,
+    FEEDBACK_PATH,
     _host_issue_url,
     train_from_dataframe,
     classify_and_recommend,
@@ -580,6 +581,53 @@ def train_from_csv(req: TrainCsvRequest):
     return {"message": "Training complete", **result}
 
 
+@router.post("/train/upload")
+async def train_from_upload(file: UploadFile = File(...)):
+    """
+    Train model from uploaded CSV file.
+    Required columns: Issue Key (or issue_key), Summary, Description (or ticket_description)
+    Optional: Labels, Priority, Severity, Status, Root Cause, Sprint
+    """
+    if not file.filename or not file.filename.endswith('.csv'):
+        raise HTTPException(status_code=400, detail="Only CSV files are allowed")
+    
+    try:
+        # Read uploaded file into pandas
+        contents = await file.read()
+        from io import BytesIO
+        df = pd.read_csv(BytesIO(contents))
+        
+        # Validate required columns (case-insensitive check)
+        cols_lower = {c.lower().strip(): c for c in df.columns}
+        
+        # Check for issue key
+        if not any(k in cols_lower for k in ["issue key", "issue_key", "key"]):
+            raise HTTPException(
+                status_code=400, 
+                detail="Missing required column: 'Issue Key' or 'issue_key'"
+            )
+        
+        # Check for summary
+        if "summary" not in cols_lower:
+            raise HTTPException(status_code=400, detail="Missing required column: 'Summary'")
+        
+        # Check for description
+        if not any(k in cols_lower for k in ["description", "ticket_description"]):
+            raise HTTPException(
+                status_code=400, 
+                detail="Missing required column: 'Description' or 'ticket_description'"
+            )
+        
+        # Train with the uploaded dataframe
+        result = train_from_dataframe(df)
+        return {"message": f"Training complete from uploaded file: {file.filename}", **result}
+        
+    except pd.errors.EmptyDataError:
+        raise HTTPException(status_code=400, detail="Uploaded CSV is empty")
+    except Exception as e:
+        logger.exception("Failed to train from uploaded CSV")
+        raise HTTPException(status_code=500, detail=f"Training failed: {str(e)}")
+
 @router.post("/predict")
 def predict(req: PredictRequest):
     try:
@@ -1094,3 +1142,32 @@ async def debug_jira_sample(max_results: int = 5):
         })
 
     return {"n_issues": len(issues), "issues_sample": out}
+
+# Add after the existing /feedback/bulk endpoint (around line 350)
+
+@router.get("/feedback/summary")
+def get_feedback_summary():
+    """Return count and list of feedback entries waiting to be used in retraining."""
+    if not FEEDBACK_PATH.exists():
+        return {"count": 0, "labels": []}
+    
+    try:
+        fb = pd.read_parquet(FEEDBACK_PATH)
+        label_counts = fb["true_label"].value_counts().to_dict()
+        return {
+            "count": int(fb.shape[0]),
+            "labels": [{"label": k, "count": int(v)} for k, v in label_counts.items()]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read feedback: {e}")
+
+
+@router.delete("/feedback/clear")
+def clear_feedback():
+    """Clear all pending feedback entries."""
+    try:
+        if FEEDBACK_PATH.exists():
+            FEEDBACK_PATH.unlink()
+        return {"message": "Feedback cleared", "ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to clear feedback: {e}")

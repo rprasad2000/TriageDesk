@@ -25,6 +25,14 @@ export const predict = (text: string, top_k = 5) => api.post<PredictResponse>("/
 export const feedback = (text: string, true_label: string, source = "user") => api.post("/feedback", { text, true_label, source }).then(r => r.data);
 export const retrain = () => api.post<TrainResponse>("/retrain").then(r => r.data);
 
+export const trainUpload = (file: File) => {
+  const formData = new FormData();
+  formData.append("file", file);
+  return api.post<TrainResponse>("/train/upload", formData, {
+    headers: { "Content-Type": "multipart/form-data" }
+  }).then(r => r.data);
+};
+
 export const syncBoard = (max_results = 2000) => api.post("/sync/board", { max_results }).then(r => r.data);
 export const getIncidents = (max_results = 2000) =>
   api.get("/incidents", { params: { max_results } }).then((r) => r.data);
@@ -86,3 +94,11 @@ export const postJiraComment = (issueKey: string, comment: string) =>
 
 export const postJiraLabels = (issueKey: string, label: string, mode: "add" | "replace" = "add") =>
   api.post(`/issues/${encodeURIComponent(issueKey)}/labels`, { label, mode }).then(r => r.data);
+
+// Add after feedbackBulk (around line 60)
+
+export const getFeedbackSummary = () => 
+  api.get("/feedback/summary").then(r => r.data);
+
+export const clearFeedback = () => 
+  api.delete("/feedback/clear").then(r => r.data);

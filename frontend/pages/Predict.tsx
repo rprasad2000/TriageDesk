@@ -926,31 +926,64 @@ const [updateCommentText, setUpdateCommentText] = useState<string>("");
     setSelectedMap((p) => ({ ...p, [issue_key]: true }));
   };
 
-  const handleRowFeedback = (issue: IssueRow) => {
-    const key = issue.issue_key;
-    const label = fbInputs[key];
-    if (!label || !label.trim()) return showMessage("Enter a label to save as feedback.");
-    const textFor = issue.ticket_description || issue.description || "";
-    bulkFeedbackMut.mutate([{ issue_key: key, text: textFor, true_label: label, source: "user" }]);
-  };
+  // const handleRowFeedback = (issue: IssueRow) => {
+  //   const key = issue.issue_key;
+  //   const label = fbInputs[key];
+  //   if (!label || !label.trim()) return showMessage("Enter a label to save as feedback.");
+  //   const textFor = issue.ticket_description || issue.description || "";
+  //   bulkFeedbackMut.mutate([{ issue_key: key, text: textFor, true_label: label, source: "user" }]);
+  // };
 
-  const handleBulkFeedbackFromSelected = () => {
-    if (selectedKeys.length === 0) return alert("Select rows to send feedback for.");
-    const entries = selectedKeys
-      .map((k) => {
-        const issue = issues.find((it) => it.issue_key === k) || ({} as IssueRow);
-        return {
-          issue_key: k,
-          text: issue.ticket_description || issue.description || "",
-          true_label: fbInputs[k] || "",
-        };
-      })
-      .filter((e) => e.true_label && e.true_label.trim());
-    if (entries.length === 0) return showMessage("Enter labels in the input boxes for selected rows.");
-    bulkFeedbackMut.mutate(entries);
-  };
+  const handleRowFeedback = (issue: IssueRow) => {
+  const key = issue.issue_key;
+  const label = fbInputs[key];
+  if (!label || !label.trim()) return showMessage("Enter a label to save as feedback.");
+  const textFor = issue.ticket_description || issue.description || "";
+  bulkFeedbackMut.mutate([{ issue_key: key, text: textFor, true_label: label, source: "user" }], {
+    onSuccess: () => {
+      showMessage("✅ Feedback saved! Go to Retrain page to retrain the model.");
+    }
+  });
+}; 
+
+  // const handleBulkFeedbackFromSelected = () => {
+  //   if (selectedKeys.length === 0) return alert("Select rows to send feedback for.");
+  //   const entries = selectedKeys
+  //     .map((k) => {
+  //       const issue = issues.find((it) => it.issue_key === k) || ({} as IssueRow);
+  //       return {
+  //         issue_key: k,
+  //         text: issue.ticket_description || issue.description || "",
+  //         true_label: fbInputs[k] || "",
+  //       };
+  //     })
+  //     .filter((e) => e.true_label && e.true_label.trim());
+  //   if (entries.length === 0) return showMessage("Enter labels in the input boxes for selected rows.");
+  //   bulkFeedbackMut.mutate(entries);
+  // };
 
   // helper booleans using mutation.status instead of .isLoading to be compatible with your TS definitions
+
+  const handleBulkFeedbackFromSelected = () => {
+  if (selectedKeys.length === 0) return alert("Select rows to send feedback for.");
+  const entries = selectedKeys
+    .map((k) => {
+      const issue = issues.find((it) => it.issue_key === k) || ({} as IssueRow);
+      return {
+        issue_key: k,
+        text: issue.ticket_description || issue.description || "",
+        true_label: fbInputs[k] || "",
+      };
+    })
+    .filter((e) => e.true_label && e.true_label.trim());
+  if (entries.length === 0) return showMessage("Enter labels in the input boxes for selected rows.");
+  bulkFeedbackMut.mutate(entries, {
+    onSuccess: () => {
+      showMessage(`✅ ${entries.length} feedback entries saved! Go to Retrain page to retrain the model.`);
+    }
+  });
+};
+
   const singlePredLoading = singlePred.status === "pending";
   const bulkPredictLoading = bulkPredictMut.status === "pending";
   const bulkFeedbackLoading = bulkFeedbackMut.status === "pending";
@@ -1108,7 +1141,18 @@ const [updateCommentText, setUpdateCommentText] = useState<string>("");
 
           <td style={{ padding: 6, width: 100 }}>{it.status || "-"}</td>
           <td style={{ padding: 6, width: 110 }}>{it.severity || "-"}</td>
-          <td style={{ padding: 6, width: 110 }}>{it.prediction || "-"}</td>
+          <td style={{ 
+            padding: 6, 
+            width: 110, 
+            maxWidth: 110,
+            overflow: "hidden", 
+            textOverflow: "ellipsis", 
+            whiteSpace: "nowrap" 
+          }}>
+            <span title={it.prediction || "-"}>
+              {it.prediction || "-"}
+            </span>
+          </td>
 
           <td style={{ padding: 6, width: 90 }}>
             {it.confidence_score

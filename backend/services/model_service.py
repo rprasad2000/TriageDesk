@@ -26,6 +26,7 @@ ENC_PATH     = MODELS_DIR / "label_encoder.joblib"
 MATRIX_PATH  = MODELS_DIR / "tfidf_matrix.npz"
 CORPUS_PATH  = MODELS_DIR / "corpus.parquet"
 FEEDBACK_PATH = DATA_DIR / "feedback.parquet"
+TRAINING_CORPUS_PATH = MODELS_DIR / "training_corpus.parquet" 
 
  # ---------------- simple in-memory artifact cache ----------------
 _artifact_cache = {
@@ -230,24 +231,22 @@ def train_from_dataframe(df: pd.DataFrame) -> Dict[str, Any]:
         joblib.dump(vec, VECT_PATH)
         _save_sparse(X_full, MATRIX_PATH)
 
-    # persist corpus for recommendations
-    # persist corpus for recommendations + metadata required by dashboard
+    # *** CHANGED: Save to TRAINING_CORPUS_PATH instead of CORPUS_PATH ***
     cols_to_save = [
         "issue_key",
         "summary",
         "ticket_description",
         "url",
         "label",
-        "created",      # <--- needed by /dashboard
+        "created",
         "priority",
         "status",
         "severity",
         "root_cause",
         "sprint"
     ]
-    # keep only columns that exist in df to avoid KeyError
     cols_to_save = [c for c in cols_to_save if c in df.columns]
-    df[cols_to_save].to_parquet(CORPUS_PATH, index=False)
+    df[cols_to_save].to_parquet(TRAINING_CORPUS_PATH, index=False)  # <-- Changed here
 
     return {
         "trained": trained,
@@ -402,18 +401,17 @@ def _load_artifacts(require_classifier: bool = True):
     in-memory cache so repeated calls (e.g. while enriching many incidents) don't
     reload large files from disk every time.
 
-    If artifacts are missing we raise FileNotFoundError as before.
-    If tfidf_matrix rows != corpus rows we truncate to the smaller size to avoid indexing errors.
-    We only emit the mismatch warning once per process to avoid spamming logs.
+    *** CHANGED: Uses TRAINING_CORPUS_PATH for recommendations (trained data) ***
+    *** CORPUS_PATH is now only for live Jira data used by /sprints endpoint ***
     """
-    # ensure required files exist first
-    if not VECT_PATH.exists() or not MATRIX_PATH.exists() or not CORPUS_PATH.exists():
+    # *** CHANGED: Check TRAINING_CORPUS_PATH instead of CORPUS_PATH ***
+    if not VECT_PATH.exists() or not MATRIX_PATH.exists() or not TRAINING_CORPUS_PATH.exists():
         raise FileNotFoundError("Model artifacts not found. Train first.")
 
     # compute mtimes for change detection
     vect_mtime = _get_mtime(VECT_PATH)
     matrix_mtime = _get_mtime(MATRIX_PATH)
-    corpus_mtime = _get_mtime(CORPUS_PATH)
+    corpus_mtime = _get_mtime(TRAINING_CORPUS_PATH)  # <-- Changed here
 
     # If cache is valid and file mtimes haven't changed, return cached artifacts
     if (_artifact_cache["vectorizer"] is not None
@@ -424,7 +422,6 @@ def _load_artifacts(require_classifier: bool = True):
         and _artifact_cache.get("corpus_mtime") == corpus_mtime):
         clf = _artifact_cache.get("clf")
         enc = _artifact_cache.get("enc")
-        # If classifier is needed but not cached, we'll load below
         if not require_classifier or (require_classifier and clf is not None and enc is not None):
             return (_artifact_cache["vectorizer"],
                     _artifact_cache["tfidf_matrix"],
@@ -435,18 +432,16 @@ def _load_artifacts(require_classifier: bool = True):
     # Load fresh artifacts from disk
     vectorizer = joblib.load(VECT_PATH)
     tfidf_matrix = _load_sparse(MATRIX_PATH)
-    corpus = pd.read_parquet(CORPUS_PATH)
+    corpus = pd.read_parquet(TRAINING_CORPUS_PATH)  # <-- Changed here
 
     # Defensive alignment: ensure tfidf_matrix rows and corpus rows match.
     try:
         n_mat = int(tfidf_matrix.shape[0])
         n_corpus = len(corpus)
         if n_mat != n_corpus:
-            # truncate both to the smaller dimension to avoid indexing errors
             m = min(n_mat, n_corpus)
             tfidf_matrix = tfidf_matrix[:m]
             corpus = corpus.iloc[:m].reset_index(drop=True)
-            # only warn once per process so logs are not spammed
             if not _artifact_cache.get("warned_mismatch", False):
                 print(f"[WARN] artifact row-count mismatch: tfidf_matrix={n_mat}, corpus={n_corpus}. Truncated to {m}.")
                 _artifact_cache["warned_mismatch"] = True
@@ -473,7 +468,6 @@ def _load_artifacts(require_classifier: bool = True):
     })
 
     return vectorizer, tfidf_matrix, corpus, clf, enc
-
 
 def classify_and_recommend(text: str, top_k: int = 5) -> Dict[str, Any]:
     vectorizer, tfidf_matrix, corpus, clf, enc = _load_artifacts(require_classifier=True)
@@ -509,9 +503,10 @@ def save_feedback(text: str, true_label: str, source: str = "user") -> None:
         rec.to_parquet(FEEDBACK_PATH, index=False)
 
 def retrain_with_feedback() -> Dict[str, Any]:
-    if not CORPUS_PATH.exists():
-        raise FileNotFoundError("No base corpus found. Train at least once.")
-    corpus = pd.read_parquet(CORPUS_PATH)
+    # *** CHANGED: Use TRAINING_CORPUS_PATH ***
+    if not TRAINING_CORPUS_PATH.exists():
+        raise FileNotFoundError("No base training corpus found. Train at least once.")
+    corpus = pd.read_parquet(TRAINING_CORPUS_PATH)  # <-- Changed here
     if FEEDBACK_PATH.exists():
         fb = pd.read_parquet(FEEDBACK_PATH)
         fb_df = pd.DataFrame({
