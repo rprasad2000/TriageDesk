@@ -16,6 +16,9 @@ import {
   postJiraLabels 
 } from "../src/api";
 const JIRA_HOST = import.meta.env.VITE_JIRA_HOST || "";
+import EnhancedForecastChart from "../src/components/EnhancedForecastChart";
+import { getForecastTrendsActive } from "../src/api";
+
 
 type IssueRow = {
   issue_key: string;
@@ -308,6 +311,7 @@ export default function Predict() {
     "Login page throws exception when submitting invalid email format."
   );
   const [topk, setTopk] = useState<number>(5);
+  const [forecastRefreshKey, setForecastRefreshKey] = useState(0);
 
   const singlePred = useMutation<PredictResponse, Error, void>({
     mutationFn: async () => {
@@ -360,6 +364,8 @@ export default function Predict() {
     refetchOnWindowFocus: false,
   });
 
+  
+
   const [selectedSprint, setSelectedSprint] = useState<string>("");
 
   // set default selected sprint once when sprints arrive (do NOT depend on selectedSprint)
@@ -379,6 +385,27 @@ export default function Predict() {
     queryFn: () => getIssues(selectedSprint, true),
     enabled: !!selectedSprint,
   });
+
+  const {
+    data: forecastData,
+    isLoading: forecastLoading,
+    refetch: refetchForecast
+   } = useQuery({
+      queryKey: ["forecastTrends", forecastRefreshKey],  // REMOVED selectedSprint dependency
+      queryFn: async () => {
+        // Fetch ALL active sprints from dropdown
+        const allSprints = sprints || [];
+        if (allSprints.length === 0) return null;
+        
+        // Use ALL sprints as "active" (or limit to last N if you prefer)
+        const activeSprints = allSprints; // This will show all sprints in chart
+        
+        return getForecastTrendsActive(activeSprints, 3);
+      },
+      enabled: (sprints?.length ?? 0) > 0,  // Only run when sprints are loaded
+      staleTime: 5 * 60 * 1000, // 5 minutes - won't refetch on sprint dropdown change
+      refetchOnWindowFocus: false, // Prevent auto-refetch
+   });
 
   // --- Jira sync helper state ---
   const [syncing, setSyncing] = useState<boolean>(false);
@@ -619,6 +646,9 @@ export default function Predict() {
       syncInProgressRef.current = false;
       // <-- ADD THIS LINE to refresh scatter after sync completes
       setScatterRefreshCounter((c) => c + 1);
+      setForecastRefreshKey((c) => c + 1);
+      refetchForecast?.();
+
     }
   };
 
@@ -1005,28 +1035,53 @@ const [updateCommentText, setUpdateCommentText] = useState<string>("");
     return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16, alignItems: "stretch" }}>
       {/* -------- Scatter chart: Unlabeled (Predicted) — by Severity -------- */}
-<div className="card" style={{ width: "100%", minWidth: 0, marginBottom: 28 }}>
-  <h2>Unlabeled (Predicted) — by Severity</h2>
+      <div className="card" style={{ width: "100%", minWidth: 0}}>
+        <h2>Unlabeled (Predicted) — by Severity</h2>
 
-  <div style={{ position: "relative", padding: 12 }}>
-    {chartLoading ? (
-      <div style={{ padding: 28, textAlign: "right", color: "#666" }}>loading...</div>
-    ) : scatterPoints.length === 0 ? (
-      <div style={{ padding: 18, color: "#666" }}>No unlabeled open issues found for selected sprint.</div>
-    ) : (
-      <div style={{ width: "100%", height: 260, boxSizing: "border-box", borderTop: "1px solid #f3f3f3", overflow: "hidden" }}>
-        <ScatterSVG
-          width={1000}
-          height={260}
-          points={scatterPoints}
-          categories={SEVERITY_CATEGORIES}
-        />
+        <div style={{ position: "relative", padding: 12 }}>
+          {chartLoading ? (
+            <div style={{ padding: 28, textAlign: "right", color: "#666" }}>loading...</div>
+          ) : scatterPoints.length === 0 ? (
+            <div style={{ padding: 18, color: "#666" }}>No unlabeled open issues found for selected sprint.</div>
+          ) : (
+            <div style={{ width: "100%", height: 260, boxSizing: "border-box", borderTop: "1px solid #f3f3f3", overflow: "hidden" }}>
+              <ScatterSVG
+                width={1000}
+                height={260}
+                points={scatterPoints}
+                categories={SEVERITY_CATEGORIES}
+              />
+            </div>
+          )}
+        </div>
       </div>
-    )}
-  </div>
-</div>
 
-      
+      {/* -------- Forecast Chart Section -------- */}
+       <div className="card" style={{ width: "100%", minWidth: 0,}}>
+
+  {forecastLoading ? (
+    <div style={{ padding: 28, textAlign: "center", color: "#666" }}>
+          <div className="spinner" style={{ margin: "0 auto", marginBottom: 8 }} />
+          Loading forecast...
+        </div>
+      ) : forecastData ? (
+        <EnhancedForecastChart
+          sprints={forecastData.sprints}
+          data={forecastData.data}
+          allLabels={forecastData.labels}
+          healthScore={forecastData.health_score}
+          forecastConfidence={forecastData.forecast_confidence}
+          recommendations={forecastData.recommendations}
+          risks={forecastData.risks}
+          wins={forecastData.wins}
+          activeSprints={forecastData.active_sprints}
+        />
+      ) : (
+        <div style={{ padding: 18, color: "#666", textAlign: "center" }}>
+          No forecast data available. Click "Refresh from Jira" to load sprints.
+        </div>
+      )}
+    </div>
 
       {/* Top: Sprint-driven prediction UI (full width) */}
       <div className="card" style={{ width: "100%", minWidth: 0 }}>

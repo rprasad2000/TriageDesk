@@ -448,6 +448,9 @@ tbody td{padding:8px;border-bottom:1px solid #f3f3f3}
   -webkit-overflow-scrolling: touch;
 }
 
+.label-chart-scroll > div { /* the inner minWidth wrapper should not add extra margin */
+  box-sizing: border-box;
+}
 /* Optional: style scrollbars (WebKit) */
 .label-chart-scroll::-webkit-scrollbar {
   height: 10px;
@@ -802,4 +805,17 @@ a.btn-dark { display: inline-flex; }
 /* ensure svg circles don't cause overflow visuals */
 .recharts-wrapper svg {
   overflow: visible; /* leave this if you rely on Recharts internal clipping; we already added overflow hidden to wrapper */
+}
+
+/* Consistent scroll look for chart + table areas */
+#forecast-chart-container::-webkit-scrollbar {
+  height: 10px;
+  width: 10px;
+}
+#forecast-chart-container::-webkit-scrollbar-thumb {
+  background-color: #bbb;
+  border-radius: 6px;
+}
+#forecast-chart-container::-webkit-scrollbar-thumb:hover {
+  background-color: #999;
 }

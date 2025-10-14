@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, UploadFile, File, Body, Query
+import numpy as np
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 import yaml, os, math
@@ -1171,3 +1172,307 @@ def clear_feedback():
         return {"message": "Feedback cleared", "ok": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to clear feedback: {e}")
+    
+
+# Add this new endpoint to your ml_router.py
+
+@router.get("/forecast/trends/active")
+async def get_active_sprint_forecast(
+    active_sprints: Optional[str] = Query(None, description="Comma-separated list of active sprint names"),
+    future_periods: int = Query(3, description="Number of future sprints to forecast")
+):
+    """
+    Generate forecast based on ACTIVE sprints only + predict 3 future sprints.
+    Uses ML classifier predictions for unlabeled issues.
+    """
+    try:
+        # Step 1: Determine active sprints
+        if active_sprints:
+            sprint_list = [s.strip() for s in active_sprints.split(",") if s.strip()]
+        else:
+            # Fallback: use last 5 sprints as "active"
+            if not CORPUS_PATH.exists():
+                raise HTTPException(status_code=404, detail="No corpus data. Run sync first.")
+            df_all = pd.read_parquet(CORPUS_PATH)
+            all_sprints = sorted([s for s in df_all["sprint"].dropna().unique() if str(s).strip()])
+            sprint_list = all_sprints[-5:] if len(all_sprints) >= 5 else all_sprints
+
+        if not sprint_list:
+            raise HTTPException(status_code=400, detail="No active sprints provided or found")
+
+        # Step 2: Fetch issues for these sprints from Jira (live data)
+        jira = JiraUtility(HOST, USERNAME, API_TOKEN)
+        all_issues = []
+        
+        for sprint_name in sprint_list:
+            safe_sprint = sprint_name.replace('"', '\\"')
+            jql = f'project = "{PROJECT_KEY}" AND issuetype = Bug AND sprint = "{safe_sprint}" ORDER BY created DESC'
+            try:
+                raw = await jira.get_issues(jql=jql, max_results=500)
+                issues = _normalize_jira_issues_payload(raw)
+                all_issues.extend(issues)
+            except Exception as e:
+                logger.warning(f"Failed to fetch sprint {sprint_name}: {e}")
+                continue
+
+        if not all_issues:
+            raise HTTPException(status_code=404, detail="No issues found in active sprints")
+
+        # Step 3: Build dataframe and classify unlabeled issues
+        df = build_df_from_jira_issues(all_issues, HOST)
+        
+        # Identify unlabeled issues (no label or empty label)
+        df["has_label"] = df["label"].astype(str).str.strip().ne("")
+        unlabeled_mask = ~df["has_label"]
+        
+        # Predict labels for unlabeled issues using ML classifier
+        if unlabeled_mask.sum() > 0:
+            try:
+                from services.model_service import classify_and_recommend_batch
+                texts = df.loc[unlabeled_mask, "ticket_description"].tolist()
+                predictions = classify_and_recommend_batch(texts, top_k=1)
+                
+                # Update dataframe with predictions
+                pred_labels = [p["prediction"] for p in predictions]
+                df.loc[unlabeled_mask, "label"] = pred_labels
+                df.loc[unlabeled_mask, "confidence"] = [p["confidence"] for p in predictions]
+            except FileNotFoundError:
+                logger.warning("ML model not trained. Skipping predictions.")
+                # Use "Unlabeled" as fallback
+                df.loc[unlabeled_mask, "label"] = "Unlabeled"
+                df.loc[unlabeled_mask, "confidence"] = 0.0
+
+        # Step 4: Aggregate counts by sprint and label
+        df_labeled = df[df["label"].astype(str).str.strip() != ""]
+        sprint_label_counts = df_labeled.groupby(["sprint", "label"]).size().reset_index(name="count")
+        
+        # Step 5: Generate forecasts for each label
+        all_labels = sprint_label_counts["label"].unique().tolist()
+        forecast_data = []
+        
+        for label in all_labels:
+            label_data = sprint_label_counts[sprint_label_counts["label"] == label]
+            
+            # Historical counts per sprint
+            historical = {}
+            for _, row in label_data.iterrows():
+                historical[row["sprint"]] = int(row["count"])
+            
+            # Get time-series values
+            counts = [historical.get(s, 0) for s in sprint_list]
+            
+            # Generate forecast using simple method
+            if len(counts) < 2:
+                # Not enough data - use last value
+                forecast_vals = [counts[-1]] * future_periods if counts else [0] * future_periods
+                confidence = 0.3
+            else:
+                # Use moving average + trend
+                recent = counts[-3:] if len(counts) >= 3 else counts
+                avg = np.mean(recent)
+                trend = (recent[-1] - recent[0]) / len(recent) if len(recent) > 1 else 0
+                
+                forecast_vals = [max(0, int(avg + trend * (i + 1))) for i in range(future_periods)]
+                confidence = min(0.9, 0.5 + (len(counts) * 0.05))
+            
+            # Add historical data points
+            for sprint_name in sprint_list:
+                forecast_data.append({
+                    "sprint": sprint_name,
+                    "label": label,
+                    "count": historical.get(sprint_name, 0),
+                    "type": "actual",
+                    "confidence": None
+                })
+            
+            # Add forecast data points
+            for i, val in enumerate(forecast_vals):
+                forecast_data.append({
+                    "sprint": f"Future {i + 1}",
+                    "label": label,
+                    "count": val,
+                    "type": "forecast",
+                    "confidence": confidence,
+                    "lower_bound": max(0, int(val * 0.8)),
+                    "upper_bound": int(val * 1.2)
+                })
+
+                seen_pairs = set()
+                forecast_data_deduped = []
+                for item in forecast_data:
+                    pair = (item["sprint"], item["label"])
+                    if pair not in seen_pairs:
+                        seen_pairs.add(pair)
+                        forecast_data_deduped.append(item)
+
+                # Replace forecast_data with the deduplicated version
+                forecast_data = forecast_data_deduped
+        
+        # Step 6: Calculate health metrics
+        health_score = _calculate_health_score(forecast_data, all_labels)
+        avg_confidence = np.mean([d["confidence"] for d in forecast_data if d["type"] == "forecast"])
+        
+        # Step 7: Identify risks and wins
+        risks, wins = _analyze_trends(forecast_data, sprint_list)
+        
+        # Step 8: Generate recommendations
+        recommendations = _generate_recommendations(health_score, risks, wins)
+        
+        # Step 9: Build response
+        all_sprint_names = sprint_list + [f"Future {i+1}" for i in range(future_periods)]
+        seen = set()
+        unique_sprints = []
+        for s in all_sprint_names:
+            if s not in seen:
+                seen.add(s)
+                unique_sprints.append(s)
+        
+        return {
+            "sprints": unique_sprints,
+            "data": forecast_data,
+            "health_score": health_score,
+            "forecast_confidence": int(avg_confidence * 100),
+            "recommendations": recommendations,
+            "risks": risks,
+            "wins": wins,
+            "labels": all_labels,
+            "active_sprints": sprint_list
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Failed to generate active sprint forecast")
+        raise HTTPException(status_code=500, detail=f"Forecast failed: {str(e)}")
+
+
+# Helper functions
+def _calculate_health_score(forecast_data: list, labels: list) -> int:
+    """Calculate overall health score (0-100)"""
+    try:
+        # Get last actual and first forecast for each label
+        scores = []
+        for label in labels:
+            label_data = [d for d in forecast_data if d["label"] == label]
+            actuals = [d for d in label_data if d["type"] == "actual"]
+            forecasts = [d for d in label_data if d["type"] == "forecast"]
+            
+            if not actuals or not forecasts:
+                continue
+            
+            last_actual = actuals[-1]["count"]
+            first_forecast = forecasts[0]["count"]
+            
+            # Calculate change percentage
+            if last_actual == 0:
+                change = 0 if first_forecast == 0 else 100
+            else:
+                change = ((first_forecast - last_actual) / last_actual) * 100
+            
+            # Score: lower increase = better
+            if change <= 0:
+                scores.append(100)  # Decreasing is good
+            elif change <= 20:
+                scores.append(80)
+            elif change <= 50:
+                scores.append(60)
+            else:
+                scores.append(40)
+        
+        return int(np.mean(scores)) if scores else 65
+    except Exception:
+        return 65
+
+
+def _analyze_trends(forecast_data: list, sprint_list: list) -> tuple:
+    """Identify top risks (increasing) and wins (decreasing)"""
+    risks = []
+    wins = []
+    
+    labels = set(d["label"] for d in forecast_data)
+    
+    for label in labels:
+        label_data = [d for d in forecast_data if d["label"] == label]
+        actuals = [d for d in label_data if d["type"] == "actual"]
+        forecasts = [d for d in label_data if d["type"] == "forecast"]
+        
+        if not actuals or not forecasts:
+            continue
+        
+        last_actual = actuals[-1]["count"]
+        first_forecast = forecasts[0]["count"]
+        
+        if last_actual == 0:
+            if first_forecast > 0:
+                pct = 100
+            else:
+                continue
+        else:
+            pct = ((first_forecast - last_actual) / last_actual) * 100
+        
+        if pct > 30:  # Increasing trend
+            risks.append({
+                "label": label,
+                "type": "Increasing defects",
+                "percentage": f"+{pct:.1f}%"
+            })
+        elif pct < -20:  # Decreasing trend
+            wins.append({
+                "label": label,
+                "type": "Trend improving",
+                "percentage": f"{pct:.1f}%"
+            })
+    
+    # Sort and limit to top 3
+    risks = sorted(risks, key=lambda x: float(x["percentage"].strip("+%")), reverse=True)[:3]
+    wins = sorted(wins, key=lambda x: float(x["percentage"].strip("%")))[:3]
+    
+    return risks, wins
+
+
+def _generate_recommendations(health_score: int, risks: list, wins: list) -> list:
+    """Generate actionable recommendations"""
+    recs = []
+    
+    if health_score >= 70:
+        recs.append({"type": "success", "message": "✅ Continue current quality practices - trends are stable"})
+    elif health_score >= 50:
+        recs.append({"type": "warning", "message": "⚠️ Monitor emerging trends - some categories increasing"})
+    else:
+        recs.append({"type": "warning", "message": "🔴 Immediate action needed - significant defect increases predicted"})
+    
+    for risk in risks[:2]:
+        recs.append({
+            "type": "warning",
+            "message": f"⚠️ Allocate additional QA resources for {risk['label']} testing"
+        })
+    
+    for win in wins[:1]:
+        recs.append({
+            "type": "success",
+            "message": f"🎯 {win['label']} trend improving - current mitigation effective"
+        })
+    
+    return recs
+
+
+@router.get("/sprints/active")
+async def get_active_sprints():
+    """Return list of currently active sprints based on Jira sprint state"""
+    jira = JiraUtility(HOST, USERNAME, API_TOKEN)
+    
+    # Fetch all sprints from your board
+    board_id = "YOUR_BOARD_ID"  # Get from Jira board settings
+    url = f"{HOST}/rest/agile/1.0/board/{board_id}/sprint?state=active"
+    
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            url,
+            auth=httpx.BasicAuth(USERNAME, API_TOKEN),
+            headers={"Accept": "application/json"}
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        
+    active = [s["name"] for s in data.get("values", []) if s.get("state") == "active"]
+    return active

@@ -102,3 +102,57 @@ export const getFeedbackSummary = () =>
 
 export const clearFeedback = () => 
   api.delete("/feedback/clear").then(r => r.data);
+
+// Add to your existing api.ts file
+
+export interface ForecastTrendResponse {
+  sprints: string[];
+  data: Array<{
+    sprint: string;
+    label: string;
+    count: number;
+    type: "actual" | "forecast";
+    confidence?: number;
+    lower_bound?: number;
+    upper_bound?: number;
+  }>;
+  health_score: number;
+  forecast_confidence: number;
+  recommendations: Array<{
+    type: "success" | "warning";
+    message: string;
+  }>;
+  risks: Array<{
+    label: string;
+    type: string;
+    percentage: string;
+  }>;
+  wins: Array<{
+    label: string;
+    type: string;
+    percentage: string;
+  }>;
+  labels: string[];
+  active_sprints: string[];
+}
+
+// Fetch forecast for active sprints only
+export const getForecastTrendsActive = async (
+  activeSprints?: string[],
+  futurePeriods = 3
+): Promise<ForecastTrendResponse> => {
+  const params = new URLSearchParams();
+  if (activeSprints && activeSprints.length > 0) {
+    params.set("active_sprints", activeSprints.join(","));
+  }
+  params.set("future_periods", String(futurePeriods));
+  
+  const res = await api.get(`/forecast/trends/active?${params.toString()}`);
+  return res.data;
+};
+
+
+export const getActiveSprints = async (): Promise<string[]> => {
+  const allSprints = await getSprintsLive(false);
+  return allSprints.slice(-2); // SIMPLE: Last 2 sprints
+};
