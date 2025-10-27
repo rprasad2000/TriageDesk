@@ -1326,12 +1326,17 @@ async def get_active_sprint_forecast(
             if s not in seen:
                 seen.add(s)
                 unique_sprints.append(s)
-        
+        if not (avg_confidence is not None and math.isfinite(avg_confidence)):
+            safe_conf_pct = 0
+        else:
+            safe_conf_pct = int(avg_confidence * 100)
+
+                
         return {
             "sprints": unique_sprints,
             "data": forecast_data,
             "health_score": health_score,
-            "forecast_confidence": int(avg_confidence * 100),
+            "forecast_confidence": safe_conf_pct,
             "recommendations": recommendations,
             "risks": risks,
             "wins": wins,
@@ -1344,6 +1349,56 @@ async def get_active_sprint_forecast(
     except Exception as e:
         logger.exception("Failed to generate active sprint forecast")
         raise HTTPException(status_code=500, detail=f"Forecast failed: {str(e)}")
+
+@router.get("/heatmap")
+async def get_heatmap_for_labels_vs_sprints(
+    active_sprints: Optional[str] = Query(None, description="Comma-separated list of sprint names (optional)"),
+    future_periods: int = Query(3, description="Number of future sprints to include (default 3)")
+):
+    """
+    Generate a label x sprint matrix payload for a heatmap.
+    Uses get_active_sprint_forecast logic (predictions + actuals) to produce:
+    {
+      "sprints": ["Sprint A", "Sprint B", "Future 1", ...],
+      "labels": ["UI","API", ...],
+      "matrix": {
+         "UI": [2, 5, 7, ...],
+         "API": [0, 3, 1, ...],
+         ...
+      }
+    }
+    """
+    try:
+        # Reuse the forecast generator implemented above.
+        # Call the same logic to produce forecast_data + sprints.
+        active_q = active_sprints if active_sprints else None
+        res = await get_active_sprint_forecast(active_sprints=active_q, future_periods=future_periods)
+
+        # res contains: sprints, data (list of rows with sprint,label,count,type), labels, ...
+        sprints = res.get("sprints", [])
+        data_rows = res.get("data", [])  # each: {sprint,label,count,type,...}
+        # collect labels in deterministic order
+        all_labels = sorted(list({r["label"] for r in data_rows}))
+
+        # Build a map: label -> sprint -> count (use integer 0 if missing)
+        mat_map = {lbl: {s: 0 for s in sprints} for lbl in all_labels}
+        for r in data_rows:
+            s = r.get("sprint")
+            lbl = r.get("label")
+            c = int(r.get("count", 0) or 0)
+            # If duplicates, sum them (shouldn't happen because forecast dedupe in the generator)
+            mat_map.setdefault(lbl, {}).setdefault(s, 0)
+            mat_map[lbl][s] = mat_map[lbl].get(s, 0) + c
+
+        # Convert per-label map to ordered arrays aligned with sprints
+        matrix = {lbl: [mat_map[lbl].get(s, 0) for s in sprints] for lbl in all_labels}
+
+        return {"sprints": sprints, "labels": all_labels, "matrix": matrix}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Failed to build heatmap payload")
+        raise HTTPException(status_code=500, detail=f"Heatmap generation failed: {e}")
 
 
 # Helper functions

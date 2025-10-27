@@ -18,6 +18,7 @@ import {
 const JIRA_HOST = import.meta.env.VITE_JIRA_HOST || "";
 import EnhancedForecastChart from "../src/components/EnhancedForecastChart";
 import { getForecastTrendsActive } from "../src/api";
+import HeatmapSection from "../src/components/HeatmapSection"; // adjust relative path
 
 
 type IssueRow = {
@@ -1065,6 +1066,8 @@ const [updateCommentText, setUpdateCommentText] = useState<string>("");
           Loading forecast...
         </div>
       ) : forecastData ? (
+
+      <>
         <EnhancedForecastChart
           sprints={forecastData.sprints}
           data={forecastData.data}
@@ -1076,6 +1079,17 @@ const [updateCommentText, setUpdateCommentText] = useState<string>("");
           wins={forecastData.wins}
           activeSprints={forecastData.active_sprints}
         />
+
+        {/* --- HEATMAP: Label x Sprint --- */}
+        {/* key={forecastRefreshKey} ensures heatmap re-renders when you refresh forecast */}
+        <div style={{ marginTop: 12 }}>
+          <HeatmapSection
+            key={forecastRefreshKey}
+            activeSprints={forecastData.sprints ?? forecastData.active_sprints}
+          />
+        </div>
+      </>
+        
       ) : (
         <div style={{ padding: 18, color: "#666", textAlign: "center" }}>
           No forecast data available. Click "Refresh from Jira" to load sprints.

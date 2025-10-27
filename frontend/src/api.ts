@@ -152,6 +152,59 @@ export const getForecastTrendsActive = async (
 };
 
 
+// src/api.ts — replace existing getHeatmap implementation with this
+export const getHeatmap = async (activeSprints?: string[], futurePeriods = 3) => {
+  const params = new URLSearchParams();
+  if (activeSprints && activeSprints.length) params.set("active_sprints", activeSprints.join(",")); // backend expects comma list
+  params.set("future_periods", String(futurePeriods));
+
+  // Try heatmap endpoint first (preferred). If it fails, attempt forecast endpoint and convert.
+  try {
+    const res = await api.get(`/heatmap?${params.toString()}`);
+    // Expect res.data to be { sprints: string[], labels: string[], matrix: Record<string, number[]> }
+    return res.data;
+  } catch (heatErr: any) {
+    // Log full server response if available (helps debugging backend 500)
+    console.error("getHeatmap: /heatmap failed:", heatErr?.response?.status, heatErr?.response?.data || heatErr.message);
+
+    // Fallback to forecast endpoint (convert into heatmap shape)
+    try {
+      const data = await api.get(`/forecast/trends/active?${params.toString()}`).then(r => r.data);
+      const sprints = Array.isArray(data.sprints) ? data.sprints : [];
+      const rows = Array.isArray(data.data) ? data.data : [];
+
+      // Build labels as string[]
+      const labels = Array.from(
+        new Set(
+          rows
+            .map((r: any) => (r && r.label != null ? String(r.label) : ""))
+            .filter((s: string) => s.trim() !== "")
+        )
+      ).sort() as string[];
+
+      const matrix: Record<string, number[]> = {};
+      labels.forEach((l) => (matrix[l] = sprints.map(() => 0)));
+
+      rows.forEach((r: any) => {
+        const lbl = r && r.label != null ? String(r.label) : "";
+        if (!lbl) return;
+        const i = sprints.indexOf(r.sprint);
+        if (i >= 0) {
+          matrix[lbl][i] = (matrix[lbl][i] || 0) + (Number(r.count) || 0);
+        }
+      });
+
+      return { sprints, labels, matrix };
+    } catch (fwErr: any) {
+      // Both endpoints failed — log both errors and return a safe empty structure
+      console.error("getHeatmap fallback: /forecast/trends/active failed:", fwErr?.response?.status, fwErr?.response?.data || fwErr.message);
+      return { sprints: [], labels: [], matrix: {} as Record<string, number[]> };
+    }
+  }
+};
+
+
+
 export const getActiveSprints = async (): Promise<string[]> => {
   const allSprints = await getSprintsLive(false);
   return allSprints.slice(-2); // SIMPLE: Last 2 sprints
